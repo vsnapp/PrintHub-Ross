@@ -1,0 +1,61 @@
+{
+  "name": "print-farm-orchestrator-desktop",
+  "version": "1.0.0",
+  "description": "Print Farm Orchestrator - Desktop App for Operators",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsc && electron dist/main.js --dev",
+    "build": "tsc",
+    "start": "electron dist/main.js",
+    "package": "electron-builder",
+    "package:win": "electron-builder --win",
+    "package:mac": "electron-builder --mac",
+    "package:linux": "electron-builder --linux"
+  },
+  "keywords": [
+    "electron",
+    "print-farm",
+    "3d-printing",
+    "orchestrator"
+  ],
+  "author": "Print Farm Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "socket.io-client": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1",
+    "typescript": "^5.3.0"
+  },
+  "build": {
+    "appId": "com.printfarm.orchestrator",
+    "productName": "Print Farm Orchestrator",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
+  }
+}
