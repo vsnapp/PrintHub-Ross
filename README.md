@@ -24,10 +24,11 @@ A production-ready 3D print farm management system with institutional authentica
 - Example: Georgia Tech students authenticate via @gatech.edu
 
 ### Print Farm Management
-- Job queue optimization with deadline awareness
-- Multi-printer support (FDM & Resin)
-- Multiple slicer integration (Cura, PrusaSlicer, OrcaSlicer, Bambu Studio, Preform)
-- Real-time WebSocket updates
+- Student portal: upload STL, get an instant print-time estimate, submit a job, and get notified (in-app + email) when the print is done
+- Job queue optimization with deadline + worker-hour awareness (long prints scheduled overnight)
+- Multi-printer support (FDM & Resin) with per-printer slicer assignment and default slicing settings
+- Embedded slicing for Cura (CuraEngine), PrusaSlicer, OrcaSlicer, Bambu Studio, and PreForm with per-slice settings overrides (layer height, nozzle/bed temperature, infill, speed, supports)
+- Real-time WebSocket updates (job created/approved/printing/completed, printer status, queue changes)
 - File management and storage
 
 ### Security & Production Features
@@ -62,12 +63,40 @@ npm install
 npm run dev
 ```
 
-The backend will run on `http://localhost:3000` and the frontend on `http://localhost:5173`.
+#### Desktop App (optional, for local slicer access)
+```sh
+cd electron
+npm install
+npm run dev
+```
+
+The backend will run on `http://localhost:3000` and the frontend on `http://localhost:8080/printhub/`.
 
 **Default Admin Credentials:**
 - Username: `admin`
 - Password: `admin123`
 - ⚠️ **Change immediately in production!**
+
+### Embedded Slicing Setup
+
+Slicing runs through the slicers' CLI engines, either **on the server** (works from the web app)
+or **locally** in the Electron desktop app. Installed slicers are auto-detected from common
+install locations and `PATH`; you can also point at specific binaries with environment variables:
+
+| Slicer | Environment variable | Notes |
+|--------|---------------------|-------|
+| Ultimaker Cura | `CURA_ENGINE_PATH` | Must point at the `CuraEngine` binary inside the Cura install |
+| PrusaSlicer | `PRUSASLICER_PATH` | Full headless slicing support (recommended baseline engine) |
+| OrcaSlicer | `ORCASLICER_PATH` | Headless CLI support varies by release; falls back to another engine if unavailable |
+| Bambu Studio | `BAMBU_STUDIO_PATH` | Same as OrcaSlicer |
+| PreForm | `PREFORM_PATH` | No headless CLI; resin jobs use geometry-based estimates + "Open in PreForm" |
+
+On Debian/Ubuntu servers, `sudo apt install prusa-slicer` is enough to enable server-side slicing.
+
+When no slicing engine is available, students still get instant print-time estimates computed
+from the STL geometry; the estimate is replaced by the slicer's exact time once a real slice runs.
+
+Check engine availability at `GET /api/slicers` or in the dashboard's Slicer tab.
 
 ### Production Deployment
 
@@ -178,9 +207,26 @@ See [LICENSING_GUIDE.md](LICENSING_GUIDE.md) for detailed setup instructions.
 - `GET /api/saml/check-domain` - Check if domain supports SSO
 
 ### Print Jobs
-- `GET /api/jobs` - List jobs
-- `POST /api/jobs` - Create job
+- `GET /api/jobs` - List jobs (students see their own)
+- `POST /api/jobs` - Create job (auto-estimates print time from attached STL)
 - `PATCH /api/jobs/:id/approve` - Approve job (operator)
+- `PATCH /api/jobs/:id/reject` - Reject job with reason (operator)
+
+### Files & Slicing
+- `POST /api/files/upload` - Upload STL/gcode (100 MB limit)
+- `POST /api/files/:id/estimate` - Instant geometry-based print time estimate
+- `GET /api/slicers` - List slicing engines available on the server (operator)
+- `POST /api/slicers/slice` - Slice an STL with a printer's assigned slicer + overrides; stores gcode and updates the job estimate (operator)
+
+### Queue & Scheduling
+- `POST /api/queue/optimize` - Re-optimize the print schedule (deadline + worker-hour aware)
+- `GET /api/queue/schedule` - Current schedule (students see their own entries)
+- `GET /api/workhours` / `PUT /api/workhours` - Farm worker hours used by the optimizer
+
+### Printers
+- `POST /api/printers` - Create printer (slicer assignment + default slicing settings)
+- `POST /api/printers/:id/print` - Start a print (uses the job's sliced gcode when present)
+- `GET /api/printers/:id/status` - Live status via OctoPrint/Moonraker/Serial/Bambu integrations
 
 See [API_TESTING_GUIDE.md](API_TESTING_GUIDE.md) for complete API documentation.
 
@@ -213,10 +259,4 @@ MIT License
 3. Commit your changes
 4. Push to the branch
 5. Create a Pull Request
-
-## Cura Multi-Printer Slice Plugin
-
-The `cura-multi-printer-plugin` directory contains a Cura extension that slices a scene for multiple selected printers and exports each G-code file to an external application's `gcode` folder. It supports environment/config overrides, auto-discovery of common install paths, and an optional silent mode.
-
-After slicing, the plugin can automatically start prints on the chosen printers. If a printer is already printing, you'll be asked whether to queue the job or skip it. There's also a **Slice Selected Printers to Queue** action that drops generated files into `<output_root>/queue` for later use.
 
