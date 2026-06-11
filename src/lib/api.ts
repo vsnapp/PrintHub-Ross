@@ -25,7 +25,9 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       localStorage.removeItem('auth_token');
       localStorage.removeItem('user');
-      window.location.href = '/login';
+      // Respect the router basename (/printhub) when redirecting to login.
+      const base = import.meta.env.BASE_URL?.replace(/\/$/, '') || '';
+      window.location.href = `${base}/login`;
     }
     return Promise.reject(error);
   }
@@ -106,7 +108,38 @@ export const filesApi = {
   },
   download: (id: number) => api.get(`/files/${id}`, { responseType: 'blob' }),
   getMetadata: (id: number) => api.get(`/files/${id}/metadata`),
+  estimate: (id: number, options?: {
+    printer_type?: 'fdm' | 'resin';
+    layer_height?: number;
+    infill?: number;
+    print_speed?: number;
+  }) => api.post(`/files/${id}/estimate`, options || {}),
   delete: (id: number) => api.delete(`/files/${id}`),
+};
+
+// Slicers (embedded server-side slicing engines)
+export type SlicerIdentifier = 'cura' | 'prusa' | 'orca' | 'bambu' | 'preform';
+
+export interface SliceRequestOverrides {
+  layerHeight?: number;
+  infill?: number;
+  printSpeed?: number;
+  nozzleTemperature?: number;
+  bedTemperature?: number;
+  supportEnabled?: boolean;
+  nozzleSize?: number;
+  customSettings?: string;
+}
+
+export const slicersApi = {
+  list: () => api.get('/slicers'),
+  slice: (data: {
+    file_id: number;
+    printer_id?: string;
+    job_id?: number;
+    slicer?: SlicerIdentifier;
+    overrides?: SliceRequestOverrides;
+  }) => api.post('/slicers/slice', data, { timeout: 10 * 60 * 1000 }),
 };
 
 // Jobs

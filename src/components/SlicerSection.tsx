@@ -8,13 +8,39 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Printer, PrinterGroup as PrinterGroupType } from "@/types/printer";
 import { SlicingViewer } from "./SlicingViewer";
+import { slicersApi, SlicerIdentifier } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { 
   Upload, 
   Play,
   Printer as PrinterIcon,
+  Send,
   Users
 } from "lucide-react";
+
+type FdmSlicerId = 'cura' | 'prusa' | 'orca' | 'bambu';
+
+const FDM_SLICERS: Array<{ id: FdmSlicerId; label: string }> = [
+  { id: 'cura', label: 'Ultimaker Cura' },
+  { id: 'prusa', label: 'PrusaSlicer' },
+  { id: 'orca', label: 'OrcaSlicer' },
+  { id: 'bambu', label: 'Bambu Studio' },
+];
+
+// Electron exposed slicers historically with alias names; normalize them.
+const LOCAL_SLICER_ALIASES: Record<string, FdmSlicerId> = {
+  cura: 'cura',
+  prusa: 'prusa',
+  prusaslicer: 'prusa',
+  orca: 'orca',
+  orcaslicer: 'orca',
+  bambu: 'bambu',
+};
+
+interface SliceAvailability {
+  local: boolean;
+  server: boolean;
+}
 
 interface SlicerSectionProps {
   printers: Printer[];
@@ -24,7 +50,7 @@ interface SlicerSectionProps {
     selectedPrinters: string[],
     selectedGroups: string[],
     jobConfig: {
-      slicer: "cura" | "orcaslicer" | "bambu";
+      slicer: SlicerIdentifier;
       overrides: {
         layerHeight: number;
         infill: number;
@@ -38,22 +64,25 @@ interface SlicerSectionProps {
     gcodeContent: string;
     gcodeFileName: string;
     estimatedPrintTimeSeconds: number;
+    gcodeFileId?: number;
   } | null>;
   onUploadGcode: (file: File, selectedPrinters: string[], selectedGroups: string[]) => void;
+  onStartPrints?: (fileId: number, selectedPrinters: string[], selectedGroups: string[]) => Promise<void>;
 }
 
-export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: SlicerSectionProps) {
+export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, onStartPrints }: SlicerSectionProps) {
   const [selectedPrinters, setSelectedPrinters] = useState<string[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [stlFile, setStlFile] = useState<File | null>(null);
   const [gcodeFile, setGcodeFile] = useState<File | null>(null);
   const [showSlicingViewer, setShowSlicingViewer] = useState(false);
   const [isSlicing, setIsSlicing] = useState(false);
-  const [selectedSlicer, setSelectedSlicer] = useState<"cura" | "orcaslicer" | "bambu">("orcaslicer");
-  const [installedSlicers, setInstalledSlicers] = useState<Record<"cura" | "orcaslicer" | "bambu", boolean>>({
-    cura: false,
-    orcaslicer: false,
-    bambu: false,
+  const [selectedSlicer, setSelectedSlicer] = useState<FdmSlicerId>("prusa");
+  const [availability, setAvailability] = useState<Record<FdmSlicerId, SliceAvailability>>({
+    cura: { local: false, server: false },
+    prusa: { local: false, server: false },
+    orca: { local: false, server: false },
+    bambu: { local: false, server: false },
   });
   const [sliceOverrides, setSliceOverrides] = useState({
     layerHeight: 0.2,
@@ -65,34 +94,56 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
   });
   const [slicedGcodeContent, setSlicedGcodeContent] = useState<string | undefined>(undefined);
   const [slicedGcodeFileName, setSlicedGcodeFileName] = useState<string | undefined>(undefined);
+  const [slicedGcodeFileId, setSlicedGcodeFileId] = useState<number | undefined>(undefined);
   const [estimatedPrintTimeSeconds, setEstimatedPrintTimeSeconds] = useState<number | undefined>(undefined);
   const [uploadedGcodeContent, setUploadedGcodeContent] = useState<string | undefined>(undefined);
   const { toast } = useToast();
 
   useEffect(() => {
     const loadSlicerAvailability = async () => {
-      if (!window.electron) {
-        return;
+      const next: Record<FdmSlicerId, SliceAvailability> = {
+        cura: { local: false, server: false },
+        prusa: { local: false, server: false },
+        orca: { local: false, server: false },
+        bambu: { local: false, server: false },
+      };
+
+      // Local desktop slicers (Electron only)
+      if (window.electron) {
+        try {
+          const result = await window.electron.getAvailableSlicers();
+          for (const slicer of result.slicers || []) {
+            const id = LOCAL_SLICER_ALIASES[slicer.name];
+            if (id) {
+              next[id].local = true;
+            }
+          }
+        } catch {
+          // Ignore local lookup failures.
+        }
       }
 
+      // Server-side embedded engines
       try {
-        const result = await window.electron.getAvailableSlicers();
-        const installed = new Set(result.slicers.map((slicer) => slicer.name));
-        const next = {
-          cura: installed.has("cura"),
-          orcaslicer: installed.has("orcaslicer"),
-          bambu: installed.has("bambu"),
-        };
-        setInstalledSlicers(next);
-
-        if (!next[selectedSlicer]) {
-          const fallback = (["orcaslicer", "bambu", "cura"] as const).find((name) => next[name]);
-          if (fallback) {
-            setSelectedSlicer(fallback);
+        const response = await slicersApi.list();
+        for (const slicer of response.data?.slicers || []) {
+          const id = slicer.id as FdmSlicerId;
+          if (id in next && slicer.cliSlicing) {
+            next[id].server = true;
           }
         }
       } catch {
-        // Ignore availability lookup failures; slicing handler shows explicit errors.
+        // Ignore server lookup failures.
+      }
+
+      setAvailability(next);
+
+      const isUsable = (id: FdmSlicerId) => next[id].local || next[id].server;
+      if (!isUsable(selectedSlicer)) {
+        const fallback = FDM_SLICERS.map(({ id }) => id).find(isUsable);
+        if (fallback) {
+          setSelectedSlicer(fallback);
+        }
       }
     };
 
@@ -105,6 +156,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
       setStlFile(file);
       setSlicedGcodeContent(undefined);
       setSlicedGcodeFileName(undefined);
+      setSlicedGcodeFileId(undefined);
       setEstimatedPrintTimeSeconds(undefined);
       setUploadedGcodeContent(undefined);
       setShowSlicingViewer(true);
@@ -132,6 +184,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
         setUploadedGcodeContent(text);
         setSlicedGcodeContent(undefined);
         setSlicedGcodeFileName(undefined);
+        setSlicedGcodeFileId(undefined);
         setEstimatedPrintTimeSeconds(undefined);
         setShowSlicingViewer(true);
       };
@@ -178,16 +231,32 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
       if (result) {
         setSlicedGcodeContent(result.gcodeContent);
         setSlicedGcodeFileName(result.gcodeFileName);
+        setSlicedGcodeFileId(result.gcodeFileId);
         setEstimatedPrintTimeSeconds(result.estimatedPrintTimeSeconds);
         setShowSlicingViewer(true);
         toast({
           title: "Slicing complete",
-          description: `${result.gcodeFileName} is ready for local preview`,
+          description: `${result.gcodeFileName} is ready${result.gcodeFileId ? ' — you can now send it to printers' : ' for preview'}`,
         });
       }
     } finally {
       setIsSlicing(false);
     }
+  };
+
+  const handlePrintSliced = async () => {
+    if (!slicedGcodeFileId || !onStartPrints) {
+      return;
+    }
+    if (selectedPrinters.length === 0 && selectedGroups.length === 0) {
+      toast({
+        title: "No targets selected",
+        description: "Please select printers or groups to print on",
+        variant: "destructive",
+      });
+      return;
+    }
+    await onStartPrints(slicedGcodeFileId, selectedPrinters, selectedGroups);
   };
 
   const handleSendGcode = () => {
@@ -289,30 +358,39 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
             <h4 className="font-medium">Slice Settings</h4>
 
             <div className="space-y-2">
-              <Label>Installed Slicers</Label>
+              <Label>Available Slicing Engines</Label>
               <div className="flex flex-wrap gap-2">
-                <Badge variant={installedSlicers.cura ? "default" : "outline"}>
-                  Cura {installedSlicers.cura ? "✓" : "✕"}
-                </Badge>
-                <Badge variant={installedSlicers.orcaslicer ? "default" : "outline"}>
-                  Orca {installedSlicers.orcaslicer ? "✓" : "✕"}
-                </Badge>
-                <Badge variant={installedSlicers.bambu ? "default" : "outline"}>
-                  Bambu {installedSlicers.bambu ? "✓" : "✕"}
-                </Badge>
+                {FDM_SLICERS.map(({ id, label }) => {
+                  const slot = availability[id];
+                  const usable = slot.local || slot.server;
+                  return (
+                    <Badge key={id} variant={usable ? "default" : "outline"}>
+                      {label} {usable ? (slot.local ? "(local)" : "(server)") : "✕"}
+                    </Badge>
+                  );
+                })}
               </div>
+              <p className="text-xs text-muted-foreground">
+                Local = slicer installed on this computer (desktop app). Server = embedded slicing engine on the farm server.
+              </p>
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="slicer-choice">Slicer</Label>
-              <Select value={selectedSlicer} onValueChange={(value: "cura" | "orcaslicer" | "bambu") => setSelectedSlicer(value)}>
+              <Select value={selectedSlicer} onValueChange={(value: FdmSlicerId) => setSelectedSlicer(value)}>
                 <SelectTrigger id="slicer-choice">
                   <SelectValue placeholder="Select slicer" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="cura" disabled={window.electron ? !installedSlicers.cura : false}>Cura</SelectItem>
-                  <SelectItem value="orcaslicer" disabled={window.electron ? !installedSlicers.orcaslicer : false}>Orca Slicer</SelectItem>
-                  <SelectItem value="bambu" disabled={window.electron ? !installedSlicers.bambu : false}>Bambu Studio</SelectItem>
+                  {FDM_SLICERS.map(({ id, label }) => (
+                    <SelectItem
+                      key={id}
+                      value={id}
+                      disabled={!availability[id].local && !availability[id].server}
+                    >
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -432,6 +510,18 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
               Slice STL File
             </Button>
             
+            {slicedGcodeFileId !== undefined && onStartPrints && (
+              <Button
+                onClick={handlePrintSliced}
+                disabled={selectedPrinters.length === 0 && selectedGroups.length === 0}
+                variant="default"
+                className="w-full"
+              >
+                <Send className="mr-2 h-4 w-4" />
+                Print Sliced Gcode ({slicedGcodeFileName})
+              </Button>
+            )}
+
             <Button 
               onClick={handleSendGcode}
               disabled={!gcodeFile || (selectedPrinters.length === 0 && selectedGroups.length === 0)}
@@ -443,7 +533,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode }: 
 
             {isSlicing && (
               <div className="text-xs text-muted-foreground">
-                Local slicing in progress...
+                Slicing in progress...
               </div>
             )}
           </div>

@@ -13,23 +13,39 @@ const toWebSocketUrl = (url: string) => {
   return url.replace('http://', 'ws://');
 };
 
-export const initializeWebSocket = (_token?: string) => {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    return socket;
-  }
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
+let shouldReconnect = false;
 
+const scheduleReconnect = () => {
+  if (!shouldReconnect || reconnectTimer) {
+    return;
+  }
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempts, 5));
+  reconnectAttempts += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (shouldReconnect) {
+      connect();
+    }
+  }, delay);
+};
+
+const connect = () => {
   socket = new WebSocket(toWebSocketUrl(WS_URL));
 
   socket.addEventListener('open', () => {
+    reconnectAttempts = 0;
     console.log('WebSocket connected');
   });
 
   socket.addEventListener('close', () => {
     console.log('WebSocket disconnected');
+    scheduleReconnect();
   });
 
-  socket.addEventListener('error', (error) => {
-    console.error('WebSocket connection error:', error);
+  socket.addEventListener('error', () => {
+    // close event follows; reconnect handled there.
   });
 
   socket.addEventListener('message', (event) => {
@@ -52,9 +68,22 @@ export const initializeWebSocket = (_token?: string) => {
   return socket;
 };
 
+export const initializeWebSocket = (_token?: string) => {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    return socket;
+  }
+  shouldReconnect = true;
+  return connect();
+};
+
 export const getSocket = () => socket;
 
 export const disconnectWebSocket = () => {
+  shouldReconnect = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (socket) {
     socket.close();
     socket = null;
@@ -66,8 +95,9 @@ export interface WebSocketEvents {
   'job:created': (job: any) => void;
   'job:updated': (job: any) => void;
   'job:approved': (job: any) => void;
+  'job:completed': (job: any) => void;
   'queue:optimized': (data: any) => void;
-  'printer:status': (data: { printerId: number; status: string }) => void;
+  'printer:status': (data: { printerId: string; status: string }) => void;
 }
 
 export const subscribeToEvent = <K extends keyof WebSocketEvents>(

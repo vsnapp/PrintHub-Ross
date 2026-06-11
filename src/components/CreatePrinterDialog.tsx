@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import { Printer } from "@/types/printer";
@@ -14,6 +15,14 @@ interface CreatePrinterDialogProps {
   onCreate: (printer: Omit<Printer, 'id'>) => void;
 }
 
+const SLICER_OPTIONS: Array<{ id: Printer['slicer']; label: string; type: 'fdm' | 'resin' }> = [
+  { id: 'cura', label: 'Ultimaker Cura', type: 'fdm' },
+  { id: 'prusa', label: 'PrusaSlicer', type: 'fdm' },
+  { id: 'orca', label: 'OrcaSlicer', type: 'fdm' },
+  { id: 'bambu', label: 'Bambu Studio', type: 'fdm' },
+  { id: 'preform', label: 'PreForm (resin)', type: 'resin' },
+];
+
 export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinterDialogProps) {
   const [formData, setFormData] = useState({
     name: "",
@@ -24,7 +33,16 @@ export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinter
     connectionType: "wifi",
     integrationType: "octoprint" as Printer['integrationType'],
     deviceId: "",
-    accessCode: ""
+    accessCode: "",
+    slicer: "cura" as Printer['slicer'],
+  });
+  const [slicerDefaults, setSlicerDefaults] = useState({
+    layerHeight: "0.2",
+    infill: "20",
+    printSpeed: "60",
+    nozzleTemperature: "210",
+    bedTemperature: "60",
+    supportEnabled: false,
   });
   const [modelSearchTerm, setModelSearchTerm] = useState("");
   
@@ -67,6 +85,11 @@ export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinter
         }
       : undefined;
 
+    const parseNumber = (value: string): number | undefined => {
+      const num = Number.parseFloat(value);
+      return Number.isFinite(num) && num > 0 ? num : undefined;
+    };
+
     const newPrinter: Omit<Printer, 'id'> = {
       name: formData.name,
       model: formData.model,
@@ -79,7 +102,17 @@ export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinter
       webcamUrl: formData.webcamUrl || (isBambu ? '' : `https://picsum.photos/320/240?random=${Math.floor(Math.random() * 100)}`),
       integrationType: formData.integrationType,
       connectionDetails,
-      slicer: formData.type === 'resin' ? 'preform' as const : 'cura' as const
+      slicer: formData.type === 'resin' ? 'preform' : formData.slicer,
+      slicerDefaults: formData.type === 'resin'
+        ? { layerHeight: parseNumber(slicerDefaults.layerHeight) }
+        : {
+            layerHeight: parseNumber(slicerDefaults.layerHeight),
+            infill: parseNumber(slicerDefaults.infill),
+            printSpeed: parseNumber(slicerDefaults.printSpeed),
+            nozzleTemperature: parseNumber(slicerDefaults.nozzleTemperature),
+            bedTemperature: parseNumber(slicerDefaults.bedTemperature),
+            supportEnabled: slicerDefaults.supportEnabled,
+          },
     };
 
     onCreate(newPrinter);
@@ -94,7 +127,16 @@ export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinter
       connectionType: "wifi",
       integrationType: "octoprint",
       deviceId: "",
-      accessCode: ""
+      accessCode: "",
+      slicer: "cura",
+    });
+    setSlicerDefaults({
+      layerHeight: "0.2",
+      infill: "20",
+      printSpeed: "60",
+      nozzleTemperature: "210",
+      bedTemperature: "60",
+      supportEnabled: false,
     });
     
     onClose();
@@ -233,6 +275,95 @@ export function CreatePrinterDialog({ isOpen, onClose, onCreate }: CreatePrinter
                 onChange={(e) => handleInputChange('webcamUrl', e.target.value)}
                 placeholder="e.g., http://192.168.1.100:8080/stream"
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="printer-slicer">Slicer</Label>
+              <Select
+                value={formData.type === 'resin' ? 'preform' : formData.slicer}
+                onValueChange={(value) => handleInputChange('slicer', value)}
+                disabled={formData.type === 'resin'}
+              >
+                <SelectTrigger id="printer-slicer">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SLICER_OPTIONS
+                    .filter(option => option.type === formData.type)
+                    .map(option => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Files sliced for this printer use this slicer with the default settings below.
+              </p>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+              <div className="text-sm font-medium">Default Slicing Settings</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="default-layer-height" className="text-xs">Layer Height (mm)</Label>
+                  <Input
+                    id="default-layer-height"
+                    value={slicerDefaults.layerHeight}
+                    onChange={(e) => setSlicerDefaults(prev => ({ ...prev, layerHeight: e.target.value }))}
+                    placeholder="0.2"
+                  />
+                </div>
+                {formData.type !== 'resin' && (
+                  <>
+                    <div className="space-y-1">
+                      <Label htmlFor="default-infill" className="text-xs">Infill (%)</Label>
+                      <Input
+                        id="default-infill"
+                        value={slicerDefaults.infill}
+                        onChange={(e) => setSlicerDefaults(prev => ({ ...prev, infill: e.target.value }))}
+                        placeholder="20"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="default-speed" className="text-xs">Print Speed (mm/s)</Label>
+                      <Input
+                        id="default-speed"
+                        value={slicerDefaults.printSpeed}
+                        onChange={(e) => setSlicerDefaults(prev => ({ ...prev, printSpeed: e.target.value }))}
+                        placeholder="60"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="default-nozzle-temp" className="text-xs">Nozzle Temp (°C)</Label>
+                      <Input
+                        id="default-nozzle-temp"
+                        value={slicerDefaults.nozzleTemperature}
+                        onChange={(e) => setSlicerDefaults(prev => ({ ...prev, nozzleTemperature: e.target.value }))}
+                        placeholder="210"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="default-bed-temp" className="text-xs">Bed Temp (°C)</Label>
+                      <Input
+                        id="default-bed-temp"
+                        value={slicerDefaults.bedTemperature}
+                        onChange={(e) => setSlicerDefaults(prev => ({ ...prev, bedTemperature: e.target.value }))}
+                        placeholder="60"
+                      />
+                    </div>
+                    <div className="flex items-end pb-1">
+                      <Label className="flex items-center gap-2 cursor-pointer text-xs">
+                        <Checkbox
+                          checked={slicerDefaults.supportEnabled}
+                          onCheckedChange={(checked) => setSlicerDefaults(prev => ({ ...prev, supportEnabled: checked === true }))}
+                        />
+                        Supports by default
+                      </Label>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
 
             {formData.integrationType === 'bambu' && (

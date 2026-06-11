@@ -1,12 +1,19 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
+/**
+ * Canonical slicer ids, matching the backend database enum:
+ * 'cura' | 'prusa' | 'orca' | 'bambu' | 'preform'
+ */
+export type SlicerId = 'cura' | 'prusa' | 'orca' | 'bambu' | 'preform';
+
 export interface SlicerConfig {
-  name: string;
+  name: SlicerId;
+  displayName: string;
   type: 'fdm' | 'resin';
   executablePath?: string;
-  cliCommand?: string;
+  cliSlicing: boolean;
 }
 
 export interface SliceOverrides {
@@ -18,30 +25,77 @@ export interface SliceOverrides {
   supportEnabled?: boolean;
 }
 
+const DISPLAY_NAMES: Record<SlicerId, string> = {
+  cura: 'Ultimaker Cura',
+  prusa: 'PrusaSlicer',
+  orca: 'OrcaSlicer',
+  bambu: 'Bambu Studio',
+  preform: 'PreForm',
+};
+
+const SLICER_ALIASES: Record<string, SlicerId> = {
+  cura: 'cura',
+  curaengine: 'cura',
+  prusa: 'prusa',
+  prusaslicer: 'prusa',
+  'prusa-slicer': 'prusa',
+  orca: 'orca',
+  orcaslicer: 'orca',
+  'orca-slicer': 'orca',
+  bambu: 'bambu',
+  bambustudio: 'bambu',
+  'bambu-studio': 'bambu',
+  preform: 'preform',
+};
+
+export function resolveSlicerId(name: string): SlicerId | null {
+  return SLICER_ALIASES[name.trim().toLowerCase()] || null;
+}
+
+function findOnPath(executables: string[]): string | null {
+  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const exe of executables) {
+    for (const dir of pathDirs) {
+      for (const ext of extensions) {
+        const candidate = path.join(dir, exe + ext);
+        try {
+          fs.accessSync(candidate, fs.constants.X_OK);
+          return candidate;
+        } catch {
+          // keep searching
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export class SlicerManager {
-  private slicers: Map<string, SlicerConfig> = new Map();
+  private slicers: Map<SlicerId, SlicerConfig> = new Map();
 
   constructor() {
     this.detectSlicers();
   }
 
   private detectSlicers() {
-    // Auto-detect installed slicers or use env variables
-    const slicerPaths = {
+    const slicerPaths: Record<SlicerId, string | null> = {
       cura: process.env.CURA_ENGINE_PATH || process.env.CURA_PATH || this.findCuraPath(),
-      prusaslicer: process.env.PRUSASLICER_PATH || this.findPrusaSlicerPath(),
-      orcaslicer: process.env.ORCASLICER_PATH || this.findOrcaSlicerPath(),
-      bambu: process.env.BAMBU_PATH || this.findBambuPath(),
+      prusa: process.env.PRUSASLICER_PATH || this.findPrusaSlicerPath(),
+      orca: process.env.ORCASLICER_PATH || this.findOrcaSlicerPath(),
+      bambu: process.env.BAMBU_STUDIO_PATH || process.env.BAMBU_PATH || this.findBambuPath(),
       preform: process.env.PREFORM_PATH || this.findPreformPath(),
     };
 
-    for (const [name, path] of Object.entries(slicerPaths)) {
-      if (path && fs.existsSync(path)) {
-        const type: 'fdm' | 'resin' = name === 'preform' ? 'resin' : 'fdm';
-        this.slicers.set(name, {
-          name,
+    for (const [id, executablePath] of Object.entries(slicerPaths) as Array<[SlicerId, string | null]>) {
+      if (executablePath && fs.existsSync(executablePath)) {
+        const type: 'fdm' | 'resin' = id === 'preform' ? 'resin' : 'fdm';
+        this.slicers.set(id, {
+          name: id,
+          displayName: DISPLAY_NAMES[id],
           type,
-          executablePath: path,
+          executablePath,
+          cliSlicing: id !== 'preform',
         });
       }
     }
@@ -59,57 +113,96 @@ export class SlicerManager {
       'C:\\Program Files\\Ultimaker Cura\\Cura.exe',
       'C:\\Program Files\\Ultimaker Cura\\CuraEngine.exe',
       '/usr/bin/CuraEngine',
+      '/usr/bin/cura-engine',
       '/usr/bin/cura',
     ];
-    return possiblePaths.find(p => fs.existsSync(p)) || null;
+    return possiblePaths.find(p => fs.existsSync(p)) || findOnPath(['CuraEngine', 'cura-engine']);
   }
 
-  private resolveCuraDefinitionPath(curaExecutablePath: string): string | null {
+  private findPrusaSlicerPath(): string | null {
+    const possiblePaths = [
+      '/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer',
+      'C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer-console.exe',
+      'C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer.exe',
+      '/usr/bin/prusa-slicer',
+    ];
+    return possiblePaths.find(p => fs.existsSync(p)) || findOnPath(['prusa-slicer', 'PrusaSlicer']);
+  }
+
+  private findOrcaSlicerPath(): string | null {
+    const possiblePaths = [
+      '/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer',
+      'C:\\Program Files\\OrcaSlicer\\orca-slicer.exe',
+      'C:\\Program Files\\OrcaSlicer\\OrcaSlicer.exe',
+      '/usr/bin/orca-slicer',
+      '/usr/bin/orcaslicer',
+    ];
+    return possiblePaths.find(p => fs.existsSync(p)) || findOnPath(['orca-slicer', 'orcaslicer', 'OrcaSlicer']);
+  }
+
+  private findBambuPath(): string | null {
+    const possiblePaths = [
+      '/Applications/BambuStudio.app/Contents/MacOS/BambuStudio',
+      '/Applications/Bambu Studio.app/Contents/MacOS/Bambu Studio',
+      'C:\\Program Files\\Bambu Studio\\bambu-studio.exe',
+      '/usr/bin/bambu-studio',
+    ];
+    return possiblePaths.find(p => fs.existsSync(p)) || findOnPath(['bambu-studio', 'BambuStudio']);
+  }
+
+  private findPreformPath(): string | null {
+    const possiblePaths = [
+      '/Applications/PreForm.app/Contents/MacOS/PreForm',
+      'C:\\Program Files\\Formlabs\\PreForm\\PreForm.exe',
+    ];
+    return possiblePaths.find(p => fs.existsSync(p)) || findOnPath(['PreForm']);
+  }
+
+  private getSlicer(slicerName: string): SlicerConfig | undefined {
+    const id = resolveSlicerId(slicerName);
+    return id ? this.slicers.get(id) : undefined;
+  }
+
+  private resolveCuraDefinitionPath(curaExecutablePath: string, fileName: string): string | null {
     const curaDir = path.dirname(curaExecutablePath);
     const candidates = [
-      path.join(curaDir, 'resources', 'definitions', 'fdmprinter.def.json'),
-      path.join(curaDir, 'share', 'cura', 'resources', 'definitions', 'fdmprinter.def.json'),
-      path.join(curaDir, '..', 'share', 'cura', 'resources', 'definitions', 'fdmprinter.def.json'),
-      path.join(curaDir, '..', 'Resources', 'resources', 'definitions', 'fdmprinter.def.json'),
+      path.join(curaDir, 'resources', 'definitions', fileName),
+      path.join(curaDir, 'share', 'cura', 'resources', 'definitions', fileName),
+      path.join(curaDir, '..', 'share', 'cura', 'resources', 'definitions', fileName),
+      path.join(curaDir, '..', 'Resources', 'resources', 'definitions', fileName),
+      `/usr/share/cura/resources/definitions/${fileName}`,
     ];
 
     return candidates.find((candidate) => fs.existsSync(candidate)) || null;
   }
 
-  private resolveCuraExtruderDefinitionPath(curaExecutablePath: string): string | null {
-    const curaDir = path.dirname(curaExecutablePath);
-    const candidates = [
-      path.join(curaDir, 'resources', 'definitions', 'fdmextruder.def.json'),
-      path.join(curaDir, 'share', 'cura', 'resources', 'definitions', 'fdmextruder.def.json'),
-      path.join(curaDir, '..', 'share', 'cura', 'resources', 'definitions', 'fdmextruder.def.json'),
-      path.join(curaDir, '..', 'Resources', 'resources', 'definitions', 'fdmextruder.def.json'),
-    ];
-
-    return candidates.find((candidate) => fs.existsSync(candidate)) || null;
-  }
-
-  private buildPrusaFamilyOverrides(overrides?: SliceOverrides): string[] {
+  /**
+   * PrusaSlicer accepts configuration values as direct CLI options
+   * (e.g. --layer-height 0.2), not via --set.
+   */
+  private buildPrusaOverrides(overrides?: SliceOverrides): string[] {
     if (!overrides) {
       return [];
     }
 
     const args: string[] = [];
     if (overrides.layerHeight !== undefined) {
-      args.push('--set', `layer_height=${overrides.layerHeight}`);
+      args.push('--layer-height', String(overrides.layerHeight));
+      args.push('--first-layer-height', String(Math.max(overrides.layerHeight, 0.2)));
     }
     if (overrides.infill !== undefined) {
-      args.push('--set', `fill_density=${overrides.infill}%`);
+      args.push('--fill-density', `${overrides.infill}%`);
     }
     if (overrides.nozzleTemperature !== undefined) {
-      args.push('--set', `temperature=${overrides.nozzleTemperature}`);
-      args.push('--set', `first_layer_temperature=${overrides.nozzleTemperature}`);
+      args.push('--temperature', String(overrides.nozzleTemperature));
+      args.push('--first-layer-temperature', String(overrides.nozzleTemperature));
     }
     if (overrides.bedTemperature !== undefined) {
-      args.push('--set', `bed_temperature=${overrides.bedTemperature}`);
-      args.push('--set', `first_layer_bed_temperature=${overrides.bedTemperature}`);
+      args.push('--bed-temperature', String(overrides.bedTemperature));
+      args.push('--first-layer-bed-temperature', String(overrides.bedTemperature));
     }
-    if (overrides.supportEnabled !== undefined) {
-      args.push('--set', `support_material=${overrides.supportEnabled ? 1 : 0}`);
+    if (overrides.supportEnabled) {
+      args.push('--support-material');
     }
 
     return args;
@@ -197,45 +290,39 @@ export class SlicerManager {
       const content = fs.readFileSync(gcodeFile, 'utf-8');
       const lines = content.split(/\r?\n/);
 
-      let hasLayerComment = false;
       let extrusionMoveCount = 0;
       let currentE = 0;
       let absoluteExtrusion = true;
 
       for (const raw of lines) {
-        const line = raw.trim();
-        const upper = line.toUpperCase();
+        const line = raw.trim().toUpperCase();
 
-        if (!line) {
+        if (!line || line.startsWith(';')) {
           continue;
         }
 
-        if (upper.startsWith(';LAYER:') || upper.includes('LAYER CHANGE')) {
-          hasLayerComment = true;
-        }
-
-        if (upper === 'M82') {
+        if (line === 'M82') {
           absoluteExtrusion = true;
           continue;
         }
-        if (upper === 'M83') {
+        if (line === 'M83') {
           absoluteExtrusion = false;
           continue;
         }
 
-        if (upper.startsWith('G92')) {
-          const reset = upper.match(/[EABC](-?\d*\.?\d+)/);
+        if (line.startsWith('G92')) {
+          const reset = line.match(/E(-?\d*\.?\d+)/);
           if (reset) {
             currentE = Number.parseFloat(reset[1]);
           }
           continue;
         }
 
-        if (!upper.startsWith('G0') && !upper.startsWith('G1') && !upper.startsWith('G2') && !upper.startsWith('G3')) {
+        if (!/^G[0123]\b/.test(line)) {
           continue;
         }
 
-        const extrusion = upper.match(/[EABC](-?\d*\.?\d+)/);
+        const extrusion = line.match(/E(-?\d*\.?\d+)/);
         if (!extrusion) {
           continue;
         }
@@ -244,13 +331,16 @@ export class SlicerManager {
         const isExtruding = absoluteExtrusion ? value > currentE + 0.00001 : value > 0.00001;
         if (isExtruding) {
           extrusionMoveCount += 1;
+          if (extrusionMoveCount > 10) {
+            return { valid: true };
+          }
         }
 
         currentE = absoluteExtrusion ? value : currentE + value;
       }
 
       if (extrusionMoveCount === 0) {
-        return { valid: false, reason: hasLayerComment ? 'Layers found but no extrusion moves detected.' : 'No extrusion moves or layers found in generated gcode.' };
+        return { valid: false, reason: 'No extrusion moves found in generated gcode.' };
       }
 
       return { valid: true };
@@ -259,54 +349,19 @@ export class SlicerManager {
     }
   }
 
-  private findPrusaSlicerPath(): string | null {
-    const possiblePaths = [
-      '/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer',
-      'C:\\Program Files\\Prusa3D\\PrusaSlicer\\prusa-slicer.exe',
-      '/usr/bin/prusa-slicer',
-    ];
-    return possiblePaths.find(p => fs.existsSync(p)) || null;
-  }
-
-  private findOrcaSlicerPath(): string | null {
-    const possiblePaths = [
-      '/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer',
-      'C:\\Program Files\\OrcaSlicer\\OrcaSlicer.exe',
-      '/usr/bin/orcaslicer',
-    ];
-    return possiblePaths.find(p => fs.existsSync(p)) || null;
-  }
-
-  private findBambuPath(): string | null {
-    const possiblePaths = [
-      '/Applications/Bambu Studio.app/Contents/MacOS/Bambu Studio',
-      'C:\\Program Files\\Bambu Studio\\bambu-studio.exe',
-      '/usr/bin/bambu-studio',
-    ];
-    return possiblePaths.find(p => fs.existsSync(p)) || null;
-  }
-
-  private findPreformPath(): string | null {
-    const possiblePaths = [
-      '/Applications/Preform.app/Contents/MacOS/Preform',
-      'C:\\Program Files\\Formlabs\\Preform\\Preform.exe',
-    ];
-    return possiblePaths.find(p => fs.existsSync(p)) || null;
-  }
-
   getSlicerPath(slicerName: string): string | null {
-    return this.slicers.get(slicerName)?.executablePath || null;
+    return this.getSlicer(slicerName)?.executablePath || null;
   }
 
   async launchSlicer(slicerName: string, stlPath: string, printerType: 'fdm' | 'resin'): Promise<{ pid: number }> {
-    const slicer = this.slicers.get(slicerName);
-    
+    const slicer = this.getSlicer(slicerName);
+
     if (!slicer) {
       throw new Error(`Slicer ${slicerName} not found or not installed`);
     }
 
     if (slicer.type !== printerType) {
-      throw new Error(`Slicer ${slicerName} is for ${slicer.type} printers, not ${printerType}`);
+      throw new Error(`Slicer ${slicer.displayName} is for ${slicer.type} printers, not ${printerType}`);
     }
 
     if (!slicer.executablePath) {
@@ -329,231 +384,203 @@ export class SlicerManager {
     printerProfile: string | undefined,
     outputPath: string,
     overrides?: SliceOverrides
-  ): Promise<{ gcodeFile: string; printTime: number }> {
-    const slicer = this.slicers.get(slicerName);
-    
-    if (!slicer || !slicer.executablePath) {
-      throw new Error(`Slicer ${slicerName} not available`);
+  ): Promise<{ gcodeFile: string; printTime: number; usedSlicer: SlicerId }> {
+    const slicerId = resolveSlicerId(slicerName);
+    if (!slicerId) {
+      throw new Error(`Unknown slicer: ${slicerName}`);
     }
 
-    if ((slicerName === 'orcaslicer' || slicerName === 'bambu') && !printerProfile) {
-      const curaSlicer = this.slicers.get('cura');
-      if (curaSlicer?.executablePath && path.basename(curaSlicer.executablePath).toLowerCase().includes('curaengine')) {
-        return this.sliceFile('cura', stlPath, undefined, outputPath, overrides);
-      }
+    const slicer = this.slicers.get(slicerId);
+    if (!slicer || !slicer.executablePath) {
+      throw new Error(`Slicer ${DISPLAY_NAMES[slicerId]} is not installed on this computer`);
+    }
 
+    if (slicerId === 'preform') {
       throw new Error(
-        `${slicerName} CLI requires profile/settings input for automated slicing. ` +
-        `Install/configure CuraEngine (CURA_ENGINE_PATH) for profile-less local slicing fallback, or provide a slicer profile file.`
+        'PreForm has no headless slicing CLI. Use "Open in PreForm" to slice resin models interactively.'
       );
     }
 
-    return new Promise(async (resolve, reject) => {
-      let baseCommand: string[];
-      let overrideCommand: string[] = [];
-      let fallbackCommands: string[][] = [];
-      const outputDir = path.dirname(outputPath);
-      const stlDir = path.dirname(stlPath);
-      const stlBaseName = path.basename(stlPath);
-      
-      switch (slicerName) {
-        case 'prusaslicer':
-          baseCommand = ['--export-gcode', '--output', outputPath];
-          if (printerProfile) {
-            baseCommand.push('--load', printerProfile);
-          }
-          overrideCommand = this.buildPrusaFamilyOverrides(overrides);
-          baseCommand.push(stlPath);
-          break;
-        case 'orcaslicer':
-        case 'bambu': {
-          baseCommand = ['--export-gcode', '--output', outputPath];
-          if (printerProfile) {
-            baseCommand.push('--load', printerProfile);
-          }
-          baseCommand.push(stlPath);
-
-          const sliceWithOutputDir = ['--slice', '1', '--outputdir', outputDir];
-          if (printerProfile) {
-            sliceWithOutputDir.push('--load-settings', printerProfile);
-          }
-          sliceWithOutputDir.push(stlPath);
-
-          const sliceWithoutValue = ['--slice', '--outputdir', outputDir];
-          if (printerProfile) {
-            sliceWithoutValue.push('--load-settings', printerProfile);
-          }
-          sliceWithoutValue.push(stlPath);
-
-          const sliceLoadStl = ['--load-stl', stlPath, '--slice', '1', '--outputdir', outputDir];
-          const sliceLoad = ['--load', stlPath, '--slice', '1', '--outputdir', outputDir];
-          const exportWithLoadStl = ['--load-stl', stlPath, '--export-gcode', '--output', outputPath];
-          const exportWithLoad = ['--load', stlPath, '--export-gcode', '--output', outputPath];
-
-          fallbackCommands = [
-            sliceWithOutputDir,
-            sliceWithoutValue,
-            sliceLoadStl,
-            sliceLoad,
-            exportWithLoadStl,
-            exportWithLoad,
-            ['--slice', '1', '--outputdir', outputDir, stlBaseName],
-            ['--slice', '--outputdir', outputDir, stlBaseName],
-          ].map((command) => {
-            const mapped = command.map((token) => token === stlBaseName ? path.join(stlDir, stlBaseName) : token);
-            if (printerProfile && !mapped.includes('--load-settings') && !mapped.includes('--load')) {
-              return ['--load-settings', printerProfile, ...mapped];
-            }
-            return mapped;
-          });
-
-          overrideCommand = [];
-          break;
-        }
-        case 'cura': {
-          const executableName = path.basename(slicer.executablePath!).toLowerCase();
-          if (!executableName.includes('curaengine')) {
-            reject(new Error('CuraEngine was not found. Set CURA_ENGINE_PATH to CuraEngine executable for CLI slicing.'));
-            return;
-          }
-
-          const definitionPath = this.resolveCuraDefinitionPath(slicer.executablePath!);
-          if (!definitionPath) {
-            reject(new Error('CuraEngine definition file not found. Please install Cura resources or set CURA_ENGINE_PATH to a complete CuraEngine installation.'));
-            return;
-          }
-
-          const extruderDefinitionPath = this.resolveCuraExtruderDefinitionPath(slicer.executablePath!);
-
-          baseCommand = [
-            'slice',
-            '-j', definitionPath,
-          ];
-
-          if (extruderDefinitionPath) {
-            baseCommand.push('-j', extruderDefinitionPath);
-          }
-
-          baseCommand.push(
-            '-l', stlPath,
-            '-o', outputPath,
-          );
-          overrideCommand = this.buildCuraOverrides(overrides);
-          break;
-        }
-        case 'preform':
-          baseCommand = ['--export', outputPath, stlPath];
-          break;
-        default:
-          reject(new Error(`CLI slicing not implemented for ${slicerName}`));
-          return;
-      }
+    // Orca/Bambu GUI builds frequently lack a usable headless CLI without
+    // profiles; fall back to another installed CLI engine if needed.
+    if ((slicerId === 'orca' || slicerId === 'bambu') && !printerProfile) {
+      const fallback = (['prusa', 'cura'] as SlicerId[])
+        .map((id) => this.slicers.get(id))
+        .find((candidate) => candidate?.executablePath
+          && (candidate.name !== 'cura'
+            || path.basename(candidate.executablePath).toLowerCase().includes('curaengine')
+            || path.basename(candidate.executablePath).toLowerCase().includes('cura-engine')));
 
       try {
-        const startedAt = Date.now();
-        if (fs.existsSync(outputPath)) {
-          try {
-            fs.unlinkSync(outputPath);
-          } catch {
-            // Ignore inability to delete stale output file.
-          }
-        }
-        const withOverrides = [...baseCommand, ...overrideCommand];
-        const firstRun = await this.runSlicerCommand(slicer.executablePath!, withOverrides);
-
-        const resolveSuccessfulOutput = (): string | null => {
-          if (fs.existsSync(outputPath)) {
-            return outputPath;
-          }
-          return this.findNewestGcodeFile(path.dirname(outputPath), startedAt);
-        };
-
-        const firstOutput = firstRun.code === 0 ? resolveSuccessfulOutput() : null;
-        if (firstOutput) {
-          const inspection = this.inspectGeneratedGcode(firstOutput);
-          if (inspection.valid) {
-            const printTime = this.parsePrintTime(firstOutput);
-            resolve({ gcodeFile: firstOutput, printTime });
-            return;
-          }
-        }
-
-        const shouldRetryWithoutOverrides = overrideCommand.length > 0
-          && (firstRun.output.toLowerCase().includes('unknown option')
-            || firstRun.output.toLowerCase().includes('invalid')
-            || firstRun.output.toLowerCase().includes('not recognized'));
-
-        if (shouldRetryWithoutOverrides) {
-          const secondRun = await this.runSlicerCommand(slicer.executablePath!, baseCommand);
-          const secondOutput = secondRun.code === 0 ? resolveSuccessfulOutput() : null;
-          if (secondOutput) {
-            const inspection = this.inspectGeneratedGcode(secondOutput);
-            if (inspection.valid) {
-              const printTime = this.parsePrintTime(secondOutput);
-              resolve({ gcodeFile: secondOutput, printTime });
-              return;
-            }
-          }
-        }
-
-        if (fallbackCommands.length > 0) {
-          let lastOutput = firstRun.output;
-          let lastCode = firstRun.code;
-          let lastInspectionReason = '';
-
-          for (const fallbackCommand of fallbackCommands) {
-            if (fs.existsSync(outputPath)) {
-              try {
-                fs.unlinkSync(outputPath);
-              } catch {
-                // Ignore inability to delete stale output file.
-              }
-            }
-
-            const run = await this.runSlicerCommand(slicer.executablePath!, fallbackCommand);
-            const outFile = run.code === 0 ? resolveSuccessfulOutput() : null;
-            if (outFile) {
-              const inspection = this.inspectGeneratedGcode(outFile);
-              if (inspection.valid) {
-                const printTime = this.parsePrintTime(outFile);
-                resolve({ gcodeFile: outFile, printTime });
-                return;
-              }
-              lastInspectionReason = inspection.reason || '';
-            }
-
-            lastOutput = run.output;
-            lastCode = run.code;
-          }
-
-          const inspectionContext = lastInspectionReason ? `\nValidation: ${lastInspectionReason}` : '';
-          reject(new Error(`Slicing failed with code ${lastCode}\n${lastOutput}${inspectionContext}`));
-          return;
-        }
-
-        reject(new Error(`Slicing failed with code ${firstRun.code}\n${firstRun.output}`));
+        return await this.runCliSlice(slicerId, slicer, stlPath, printerProfile, outputPath, overrides);
       } catch (error) {
-        reject(error);
+        if (fallback) {
+          const result = await this.runCliSlice(fallback.name, fallback, stlPath, undefined, outputPath, overrides);
+          return { ...result, usedSlicer: fallback.name };
+        }
+        throw error;
       }
-    });
+    }
+
+    return this.runCliSlice(slicerId, slicer, stlPath, printerProfile, outputPath, overrides);
+  }
+
+  private async runCliSlice(
+    slicerId: SlicerId,
+    slicer: SlicerConfig,
+    stlPath: string,
+    printerProfile: string | undefined,
+    outputPath: string,
+    overrides?: SliceOverrides
+  ): Promise<{ gcodeFile: string; printTime: number; usedSlicer: SlicerId }> {
+    let baseCommand: string[];
+    let overrideCommand: string[] = [];
+    let fallbackCommands: string[][] = [];
+    const outputDir = path.dirname(outputPath);
+
+    switch (slicerId) {
+      case 'prusa':
+        baseCommand = ['--export-gcode', '--output', outputPath];
+        if (printerProfile) {
+          baseCommand.push('--load', printerProfile);
+        }
+        overrideCommand = this.buildPrusaOverrides(overrides);
+        baseCommand.push(stlPath);
+        break;
+      case 'orca':
+      case 'bambu': {
+        baseCommand = ['--slice', '0', '--outputdir', outputDir];
+        if (printerProfile) {
+          baseCommand.push('--load-settings', printerProfile);
+        }
+        baseCommand.push(stlPath);
+
+        const sliceOne = ['--slice', '1', '--outputdir', outputDir];
+        const exportGcode = ['--export-gcode', '--output', outputPath];
+        if (printerProfile) {
+          sliceOne.push('--load-settings', printerProfile);
+          exportGcode.push('--load', printerProfile);
+        }
+        sliceOne.push(stlPath);
+        exportGcode.push(stlPath);
+
+        fallbackCommands = [sliceOne, exportGcode];
+        break;
+      }
+      case 'cura': {
+        const executableName = path.basename(slicer.executablePath!).toLowerCase();
+        if (!executableName.includes('curaengine') && !executableName.includes('cura-engine')) {
+          throw new Error('CuraEngine was not found. Set CURA_ENGINE_PATH to the CuraEngine executable for CLI slicing.');
+        }
+
+        const definitionPath = this.resolveCuraDefinitionPath(slicer.executablePath!, 'fdmprinter.def.json');
+        if (!definitionPath) {
+          throw new Error('CuraEngine definition file not found. Please install Cura resources or set CURA_ENGINE_PATH to a complete CuraEngine installation.');
+        }
+
+        const extruderDefinitionPath = this.resolveCuraDefinitionPath(slicer.executablePath!, 'fdmextruder.def.json');
+
+        baseCommand = ['slice', '-j', definitionPath];
+
+        if (extruderDefinitionPath) {
+          baseCommand.push('-j', extruderDefinitionPath);
+        }
+
+        overrideCommand = this.buildCuraOverrides(overrides);
+        baseCommand.push('-l', stlPath, '-o', outputPath);
+        break;
+      }
+      default:
+        throw new Error(`CLI slicing not implemented for ${slicerId}`);
+    }
+
+    const startedAt = Date.now();
+    if (fs.existsSync(outputPath)) {
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        // Ignore inability to delete stale output file.
+      }
+    }
+
+    const resolveSuccessfulOutput = (): string | null => {
+      if (fs.existsSync(outputPath)) {
+        return outputPath;
+      }
+      return this.findNewestGcodeFile(outputDir, startedAt);
+    };
+
+    const attempts: string[][] = [
+      [...baseCommand.slice(0, -1), ...overrideCommand, baseCommand[baseCommand.length - 1]],
+      ...(overrideCommand.length > 0 ? [baseCommand] : []),
+      ...fallbackCommands,
+    ];
+
+    let lastCode: number | null = null;
+    let lastOutput = '';
+    let lastInspectionReason = '';
+
+    for (const command of attempts) {
+      const run = await this.runSlicerCommand(slicer.executablePath!, command);
+      lastCode = run.code;
+      lastOutput = run.output;
+
+      const outFile = run.code === 0 ? resolveSuccessfulOutput() : null;
+      if (outFile) {
+        const inspection = this.inspectGeneratedGcode(outFile);
+        if (inspection.valid) {
+          return { gcodeFile: outFile, printTime: this.parsePrintTime(outFile), usedSlicer: slicerId };
+        }
+        lastInspectionReason = inspection.reason || '';
+      }
+    }
+
+    const inspectionContext = lastInspectionReason ? `\nValidation: ${lastInspectionReason}` : '';
+    throw new Error(`Slicing failed with code ${lastCode}\n${lastOutput.slice(-2000)}${inspectionContext}`);
+  }
+
+  private parseDurationString(value: string): number {
+    const match = value.trim().match(/(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/);
+    if (!match || match[0].trim() === '') {
+      return 0;
+    }
+    const [, d, h, m, s] = match;
+    return (Number.parseInt(d || '0', 10) * 86400)
+      + (Number.parseInt(h || '0', 10) * 3600)
+      + (Number.parseInt(m || '0', 10) * 60)
+      + Number.parseInt(s || '0', 10);
   }
 
   private parsePrintTime(gcodeFile: string): number {
     try {
       const content = fs.readFileSync(gcodeFile, 'utf-8');
-      const lines = content.split('\n').slice(0, 100);
+      const lines = content.split('\n');
 
       for (const line of lines) {
-        if (line.includes(';TIME:')) {
-          const match = line.match(/;TIME:(\d+)/);
-          if (match) {
-            return parseInt(match[1]);
+        if (!line.startsWith(';')) {
+          continue;
+        }
+        // Cura: ;TIME:12345
+        const curaTime = line.match(/^;TIME:(\d+)/);
+        if (curaTime) {
+          return Number.parseInt(curaTime[1], 10);
+        }
+        // PrusaSlicer: ; estimated printing time (normal mode) = 1h 32m 16s
+        if (/estimated printing time/i.test(line)) {
+          const idx = line.indexOf('=');
+          if (idx >= 0) {
+            const seconds = this.parseDurationString(line.slice(idx + 1));
+            if (seconds > 0) {
+              return seconds;
+            }
           }
         }
-        if (line.includes('estimated printing time')) {
-          const match = line.match(/(\d+)h\s*(\d+)m/);
-          if (match) {
-            return parseInt(match[1]) * 3600 + parseInt(match[2]) * 60;
+        // Orca/Bambu: ; total estimated time: 1h 32m 16s
+        if (/total estimated time:/i.test(line) || /model printing time:/i.test(line)) {
+          const idx = line.indexOf(':');
+          const seconds = this.parseDurationString(line.slice(idx + 1));
+          if (seconds > 0) {
+            return seconds;
           }
         }
       }

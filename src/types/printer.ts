@@ -45,6 +45,22 @@ export interface CommonSlicingSettings {
   wallNumber: number;
 }
 
+/**
+ * Default slicing settings stored per printer (backend printers.slicer_settings).
+ * Used as the base configuration when slicing for this printer; per-slice
+ * overrides take precedence.
+ */
+export interface SlicerDefaultSettings {
+  layerHeight?: number;
+  infill?: number;
+  printSpeed?: number;
+  nozzleTemperature?: number;
+  bedTemperature?: number;
+  supportEnabled?: boolean;
+  nozzleSize?: number;
+  customSettings?: string;
+}
+
 export interface PrinterSlicingSettings {
   layerHeight: number | 'default';
   infill: number | 'default';
@@ -120,6 +136,7 @@ export interface Printer {
   firmware?: string;
   gcodeData?: string; // For tracking active gcode
   slicingSettings?: PrinterSlicingSettings;
+  slicerDefaults?: SlicerDefaultSettings;
   slicer: 'cura' | 'orca' | 'prusa' | 'bambu' | 'preform'; // Supported slicers (preform for resin)
   speedMultiplier?: number; // Print speed relative to baseline (1.0 = normal, 1.2 = 20% faster, 0.8 = 20% slower)
   maxPrintSpeed?: number; // Maximum print speed in mm/s

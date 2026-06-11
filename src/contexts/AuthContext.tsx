@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { authApi, User } from '@/lib/api';
-import { initializeWebSocket, disconnectWebSocket } from '@/lib/websocket';
+import { initializeWebSocket, disconnectWebSocket, subscribeToEvent } from '@/lib/websocket';
 import { useToast } from '@/hooks/use-toast';
 
 interface AuthContextType {
@@ -47,6 +47,58 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     setLoading(false);
   }, []);
+
+  // Real-time print notifications for the signed-in user.
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const unsubscribeCompleted = subscribeToEvent('job:completed', (event: any) => {
+      if (event.userId === user.id) {
+        toast({
+          title: 'Your print is finished!',
+          description: `"${event.jobName || `Job #${event.jobId}`}" has completed and is ready for pickup.`,
+        });
+      } else if (user.role !== 'student') {
+        toast({
+          title: 'Print completed',
+          description: `Job "${event.jobName || `#${event.jobId}`}" finished${event.printerName ? ` on ${event.printerName}` : ''}.`,
+        });
+      }
+    });
+
+    const unsubscribeApproved = subscribeToEvent('job:approved', (event: any) => {
+      if (event.userId === user.id) {
+        toast({
+          title: 'Print approved',
+          description: 'Your print job was approved and will be scheduled.',
+        });
+      }
+    });
+
+    const unsubscribeUpdated = subscribeToEvent('job:updated', (event: any) => {
+      if (event.userId === user.id && event.status === 'rejected') {
+        toast({
+          title: 'Print rejected',
+          description: 'Your print job was rejected. Check the job notes for details.',
+          variant: 'destructive',
+        });
+      }
+      if (event.userId === user.id && event.status === 'printing') {
+        toast({
+          title: 'Print started',
+          description: 'Your print job is now printing.',
+        });
+      }
+    });
+
+    return () => {
+      unsubscribeCompleted();
+      unsubscribeApproved();
+      unsubscribeUpdated();
+    };
+  }, [user, toast]);
 
   const login = async (username: string, password: string) => {
     try {
