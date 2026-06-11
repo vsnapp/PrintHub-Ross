@@ -23,7 +23,7 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // Update work hours configuration (operators only)
-router.put('/', authenticateToken, requireRole(['operator', 'admin']), async (req, res) => {
+router.put('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin']), async (req, res) => {
   try {
     const { start_hour, end_hour } = req.body;
 

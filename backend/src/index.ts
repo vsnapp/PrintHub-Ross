@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
-import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
+import { initWebSocket } from './websocket';
 import { initializeDatabase, closeDatabase } from './database';
 import { apiLimiter, authLimiter, uploadLimiter, paymentLimiter } from './middleware/rateLimiter';
 import authRoutes from './routes/auth';
@@ -34,7 +34,7 @@ try {
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+initWebSocket(server);
 
 const PORT = process.env.PORT || 3000;
 
@@ -103,6 +103,7 @@ import samlRoutes from './routes/saml';
 import analyticsRoutes from './routes/analytics';
 import whitelistRoutes from './routes/whitelist';
 import emailRoutes from './routes/email';
+import slicersRoutes from './routes/slicers';
 
 // Mount route handlers with specific rate limiters
 app.use('/api/auth', authLimiter, authRoutes);
@@ -117,44 +118,7 @@ app.use('/api/saml', samlRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/whitelist', whitelistRoutes);
 app.use('/api/email', emailRoutes);
-
-// WebSocket connection handling
-wss.on('connection', (ws) => {
-  console.log('New WebSocket connection established');
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message.toString());
-      console.log('Received message:', data);
-      
-      // Handle different message types
-      switch (data.type) {
-        case 'subscribe:jobs':
-          // Subscribe client to job updates
-          ws.send(JSON.stringify({ type: 'subscribed', channel: 'jobs' }));
-          break;
-        case 'subscribe:printers':
-          // Subscribe client to printer updates
-          ws.send(JSON.stringify({ type: 'subscribed', channel: 'printers' }));
-          break;
-        default:
-          ws.send(JSON.stringify({ type: 'error', message: 'Unknown message type' }));
-      }
-    } catch (error) {
-      console.error('Error parsing WebSocket message:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('WebSocket connection closed');
-  });
-
-  // Send initial connection success message
-  ws.send(JSON.stringify({
-    type: 'connected',
-    message: 'Connected to Print Farm Orchestrator'
-  }));
-});
+app.use('/api/slicers', slicersRoutes);
 
 // Start server
 server.listen(PORT, () => {

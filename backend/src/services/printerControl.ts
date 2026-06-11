@@ -2,12 +2,16 @@ import path from 'path';
 import { db } from '../database';
 import { buildAdapter } from './printerAdapters';
 import { ConnectionDetails, PrinterIntegrationType, PrinterStatusInfo, TerminalEntry } from './printerAdapters/types';
+import { emailService } from '../utils/emailService';
+import { broadcast } from '../websocket';
 
 interface PrinterRecord {
   id: string;
   name: string;
   ip_address?: string;
   type?: string;
+  status?: string;
+  current_job_id?: number | null;
   integration_type?: PrinterIntegrationType | null;
   connection_details?: string | null;
 }
@@ -88,6 +92,52 @@ function ensureGcodeFile(file: FileRecord) {
   }
 }
 
+/**
+ * Mark the active job complete when a printer transitions from printing to
+ * idle, then notify the owner (WebSocket broadcast + optional email).
+ */
+function handlePrintCompletion(printer: PrinterRecord, newStatus: string) {
+  const wasPrinting = printer.status === 'printing' || printer.status === 'paused';
+  const isIdle = newStatus === 'online' || newStatus === 'offline';
+  if (!wasPrinting || !isIdle || !printer.current_job_id) {
+    return;
+  }
+
+  const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(printer.current_job_id) as any;
+  if (!job || job.status === 'completed' || job.status === 'cancelled' || job.status === 'failed') {
+    db.prepare('UPDATE printers SET current_job_id = NULL WHERE id = ?').run(printer.id);
+    return;
+  }
+
+  db.prepare("UPDATE print_jobs SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .run(job.id);
+  db.prepare('UPDATE printers SET current_job_id = NULL WHERE id = ?').run(printer.id);
+
+  broadcast('job:completed', {
+    jobId: job.id,
+    userId: job.user_id,
+    jobName: job.name,
+    printerId: printer.id,
+    printerName: printer.name,
+    status: 'completed',
+  });
+
+  if (emailService.isAutoSendEnabled()) {
+    const user = db.prepare('SELECT email, username FROM users WHERE id = ?').get(job.user_id) as any;
+    if (user?.email) {
+      emailService.sendJobCompletionEmail(user.email, {
+        jobName: job.name,
+        username: user.username,
+        createdAt: new Date(job.created_at).toLocaleString(),
+        completedAt: new Date().toLocaleString(),
+        printerType: (job.printer_type || 'fdm').toUpperCase(),
+      }).catch((error) => {
+        console.error('Failed to send automatic completion email:', error);
+      });
+    }
+  }
+}
+
 export async function getPrinterStatus(printerId: string): Promise<PrinterStatusInfo> {
   const printer = db.prepare('SELECT * FROM printers WHERE id = ?').get(printerId) as PrinterRecord | undefined;
   if (!printer) {
@@ -99,6 +149,11 @@ export async function getPrinterStatus(printerId: string): Promise<PrinterStatus
 
   db.prepare('UPDATE printers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
     .run(status.status, printerId);
+
+  if (printer.status !== status.status) {
+    broadcast('printer:status', { printerId, status: status.status });
+    handlePrintCompletion(printer, status.status);
+  }
 
   return status;
 }
@@ -121,11 +176,13 @@ export async function startPrint(printerId: string, fileId?: number, jobId?: num
 
   let resolvedFileId = fileId;
   if (!resolvedFileId && jobId) {
-    const job = db.prepare('SELECT file_id FROM print_jobs WHERE id = ?').get(jobId) as { file_id?: number } | undefined;
-    if (!job || !job.file_id) {
+    // Prefer the sliced gcode over the original STL.
+    const job = db.prepare('SELECT file_id, gcode_file_id FROM print_jobs WHERE id = ?')
+      .get(jobId) as { file_id?: number; gcode_file_id?: number } | undefined;
+    if (!job || (!job.file_id && !job.gcode_file_id)) {
       throw new Error('Job does not have an associated file');
     }
-    resolvedFileId = job.file_id;
+    resolvedFileId = job.gcode_file_id || job.file_id;
   }
 
   if (!resolvedFileId) {
@@ -148,7 +205,10 @@ export async function startPrint(printerId: string, fileId?: number, jobId?: num
   if (jobId) {
     db.prepare('UPDATE print_jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
       .run('printing', jobId);
+    const job = db.prepare('SELECT user_id FROM print_jobs WHERE id = ?').get(jobId) as any;
+    broadcast('job:updated', { jobId, userId: job?.user_id, status: 'printing' });
   }
+  broadcast('printer:status', { printerId, status: 'printing' });
 
   return { printerId, remoteFile: uploadResult.remoteFile, fileId: resolvedFileId };
 }

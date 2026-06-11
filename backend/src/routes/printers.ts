@@ -159,6 +159,7 @@ router.post('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin
       connection_type,
       integration_type,
       connection_details,
+      slicer_settings,
       speed_multiplier,
       max_print_speed,
       build_volume_x,
@@ -170,6 +171,11 @@ router.post('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin
       return res.status(400).json({ error: 'name and type are required' });
     }
 
+    const allowedSlicers = ['cura', 'orca', 'prusa', 'bambu', 'preform'];
+    if (slicer !== undefined && slicer !== null && !allowedSlicers.includes(slicer)) {
+      return res.status(400).json({ error: `Invalid slicer. Allowed: ${allowedSlicers.join(', ')}` });
+    }
+
     const printerId = id || `printer-${Date.now()}`;
     const resolvedSlicer = slicer || (type === 'resin' ? 'preform' : 'cura');
     const resolvedStatus = status || 'offline';
@@ -178,6 +184,12 @@ router.post('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin
       ? (typeof connection_details === 'string'
           ? connection_details
           : JSON.stringify(connection_details))
+      : null;
+
+    const slicerSettings = slicer_settings
+      ? (typeof slicer_settings === 'string'
+          ? slicer_settings
+          : JSON.stringify(slicer_settings))
       : null;
 
     db.prepare(`
@@ -197,8 +209,9 @@ router.post('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin
         webcam_url,
         connection_type,
         integration_type,
-        connection_details
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        connection_details,
+        slicer_settings
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       printerId,
       name,
@@ -215,7 +228,8 @@ router.post('/', authenticateToken, requireRole(['operator', 'admin', 'org_admin
       webcam_url || null,
       connection_type || null,
       integration_type || null,
-      details
+      details,
+      slicerSettings
     );
 
     const createdPrinter = db.prepare('SELECT * FROM printers WHERE id = ?').get(printerId);
@@ -341,7 +355,7 @@ router.get('/:id/webcam', authenticateWebcamRequest, async (req: AuthRequest, re
 });
 
 // Update printer status (operators/admin only)
-router.patch('/:id/status', authenticateToken, requireRole(['operator', 'admin']), (req, res) => {
+router.patch('/:id/status', authenticateToken, requireRole(['operator', 'admin', 'org_admin']), (req, res) => {
   try {
     const { status } = req.body;
     
@@ -368,10 +382,38 @@ router.patch('/:id', authenticateToken, requireRole(['operator', 'admin', 'org_a
     const params: any[] = [];
     const allowedConnectionTypes = ['wifi', 'usb', 'network'];
     const allowedIntegrationTypes = ['octoprint', 'moonraker', 'serial', 'bambu', 'formlabs'];
+    const allowedSlicers = ['cura', 'orca', 'prusa', 'bambu', 'preform'];
 
     if (req.body.name !== undefined) {
       updates.push('name = ?');
       params.push(req.body.name);
+    }
+
+    if (req.body.slicer !== undefined) {
+      if (!allowedSlicers.includes(req.body.slicer)) {
+        return res.status(400).json({ error: 'Invalid slicer' });
+      }
+      updates.push('slicer = ?');
+      params.push(req.body.slicer);
+    }
+
+    if (req.body.slicer_settings !== undefined) {
+      const settings = req.body.slicer_settings === null
+        ? null
+        : (typeof req.body.slicer_settings === 'string'
+            ? req.body.slicer_settings
+            : JSON.stringify(req.body.slicer_settings));
+      updates.push('slicer_settings = ?');
+      params.push(settings);
+    }
+
+    if (req.body.speed_multiplier !== undefined) {
+      const multiplier = Number(req.body.speed_multiplier);
+      if (!Number.isFinite(multiplier) || multiplier <= 0) {
+        return res.status(400).json({ error: 'speed_multiplier must be a positive number' });
+      }
+      updates.push('speed_multiplier = ?');
+      params.push(multiplier);
     }
 
     if (req.body.ip_address !== undefined) {
