@@ -134,8 +134,11 @@ router.get('/schedule', authenticateToken, async (req, res) => {
         pj.name as job_name,
         pj.priority,
         pj.user_id,
+        pj.status as job_status,
+        pj.gcode_file_id,
         p.name as printer_name,
         p.type as printer_type,
+        p.status as printer_status,
         u.username
       FROM queue_schedule qs
       JOIN print_jobs pj ON qs.job_id = pj.id

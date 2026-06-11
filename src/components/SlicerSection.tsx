@@ -10,6 +10,16 @@ import { Printer, PrinterGroup as PrinterGroupType } from "@/types/printer";
 import { SlicingViewer } from "./SlicingViewer";
 import { slicersApi, SlicerIdentifier } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { 
   Upload, 
   Play,
@@ -97,6 +107,8 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
   const [slicedGcodeFileId, setSlicedGcodeFileId] = useState<number | undefined>(undefined);
   const [estimatedPrintTimeSeconds, setEstimatedPrintTimeSeconds] = useState<number | undefined>(undefined);
   const [uploadedGcodeContent, setUploadedGcodeContent] = useState<string | undefined>(undefined);
+  // Bed-clear confirmation before dispatching prints to the selected targets.
+  const [confirmAction, setConfirmAction] = useState<null | 'sliced' | 'gcode'>(null);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -244,7 +256,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
     }
   };
 
-  const handlePrintSliced = async () => {
+  const handlePrintSliced = () => {
     if (!slicedGcodeFileId || !onStartPrints) {
       return;
     }
@@ -256,7 +268,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
       });
       return;
     }
-    await onStartPrints(slicedGcodeFileId, selectedPrinters, selectedGroups);
+    setConfirmAction('sliced');
   };
 
   const handleSendGcode = () => {
@@ -278,12 +290,27 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
       return;
     }
 
-    onUploadGcode(gcodeFile, selectedPrinters, selectedGroups);
-    toast({
-      title: "Gcode sent",
-      description: `${gcodeFile.name} sent to ${selectedPrinters.length} printers and ${selectedGroups.length} groups`,
-    });
+    setConfirmAction('gcode');
   };
+
+  const handleConfirmDispatch = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action === 'sliced' && slicedGcodeFileId && onStartPrints) {
+      await onStartPrints(slicedGcodeFileId, selectedPrinters, selectedGroups);
+    } else if (action === 'gcode' && gcodeFile) {
+      onUploadGcode(gcodeFile, selectedPrinters, selectedGroups);
+    }
+  };
+
+  const targetPrinterCount = (() => {
+    const ids = new Set(selectedPrinters);
+    for (const groupId of selectedGroups) {
+      const group = groups.find(g => g.id === groupId);
+      group?.printerIds.forEach(id => ids.add(id));
+    }
+    return ids.size;
+  })();
 
   const togglePrinterSelection = (printerId: string) => {
     setSelectedPrinters(prev => 
@@ -621,6 +648,29 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
           </div>
         </CardContent>
       </Card>
+
+      {/* Bed-clear confirmation before dispatching gcode to printers */}
+      <AlertDialog open={confirmAction !== null} onOpenChange={(open) => { if (!open) setConfirmAction(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {targetPrinterCount === 1 ? 'Is the print bed clear?' : 'Are all print beds clear?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This will start "{confirmAction === 'gcode' ? gcodeFile?.name : slicedGcodeFileName}" on{' '}
+              {targetPrinterCount} printer{targetPrinterCount === 1 ? '' : 's'}.
+              Confirm previous prints have been removed and every targeted bed is clear and ready.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not yet</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDispatch}>
+              <Play className="h-4 w-4 mr-2" />
+              {targetPrinterCount === 1 ? 'Bed is clear — start print' : 'Beds are clear — start prints'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

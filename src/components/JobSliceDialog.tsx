@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -46,6 +56,8 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
   const [selectedPrinterId, setSelectedPrinterId] = useState<string>('');
   const [slicing, setSlicing] = useState(false);
   const [starting, setStarting] = useState(false);
+  // A human must confirm the bed is clear before any print is started.
+  const [showBedConfirm, setShowBedConfirm] = useState(false);
   const [result, setResult] = useState<any | null>(null);
   const [overrides, setOverrides] = useState({
     layerHeight: '',
@@ -173,6 +185,7 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
         description: `${job.name} is printing on ${selectedPrinter?.name}.`,
       });
       onSliced();
+      setShowBedConfirm(false);
       onClose();
     } catch (error: any) {
       toast({
@@ -180,6 +193,7 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
         description: error.response?.data?.error || 'Printer rejected the job',
         variant: 'destructive',
       });
+      setShowBedConfirm(false);
     } finally {
       setStarting(false);
     }
@@ -306,7 +320,7 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
               Slice
             </Button>
             <Button
-              onClick={handleStartPrint}
+              onClick={() => setShowBedConfirm(true)}
               disabled={starting || !result || result.method !== 'cli-slice' || !selectedPrinterId}
               variant="default"
               className="flex-1"
@@ -316,6 +330,26 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
             </Button>
           </div>
         </div>
+
+        {/* Bed-clear confirmation before the print starts */}
+        <AlertDialog open={showBedConfirm} onOpenChange={(open) => { if (!open && !starting) setShowBedConfirm(false); }}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Is the print bed clear?</AlertDialogTitle>
+              <AlertDialogDescription>
+                You are about to start "{job?.name}" on {selectedPrinter?.name}.
+                Confirm the previous print has been removed and the bed is clear and ready.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={starting}>Not yet</AlertDialogCancel>
+              <AlertDialogAction onClick={(event) => { event.preventDefault(); handleStartPrint(); }} disabled={starting}>
+                {starting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
+                Bed is clear — start print
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );

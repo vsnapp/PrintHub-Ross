@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { jobsApi, queueApi, workHoursApi } from '@/lib/api';
+import { jobsApi, printersApi, queueApi, workHoursApi } from '@/lib/api';
 import { subscribeToEvent } from '@/lib/websocket';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
@@ -9,9 +9,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   CalendarClock,
   Loader2,
   Moon,
+  Play,
   RefreshCw,
   Trash2,
   Wand2,
@@ -22,8 +33,11 @@ interface ScheduleRow {
   job_id: number;
   printer_id: string;
   job_name: string;
+  job_status: string;
+  gcode_file_id?: number | null;
   printer_name: string;
   printer_type: string;
+  printer_status: string;
   priority: string;
   username: string;
   start_time: string;
@@ -54,6 +68,10 @@ export function SchedulePanel() {
   const [loading, setLoading] = useState(true);
   const [optimizing, setOptimizing] = useState(false);
   const [summary, setSummary] = useState<OptimizeSummary | null>(null);
+  // Prints never start automatically: an operator must confirm the bed is
+  // clear before a scheduled job is sent to its printer.
+  const [rowToStart, setRowToStart] = useState<ScheduleRow | null>(null);
+  const [starting, setStarting] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -132,6 +150,30 @@ export function SchedulePanel() {
       });
     } finally {
       setOptimizing(false);
+    }
+  };
+
+  const handleConfirmStart = async () => {
+    if (!rowToStart) {
+      return;
+    }
+    setStarting(true);
+    try {
+      await printersApi.startPrint(rowToStart.printer_id, { job_id: rowToStart.job_id });
+      toast({
+        title: 'Print started',
+        description: `"${rowToStart.job_name}" is now printing on ${rowToStart.printer_name}.`,
+      });
+      fetchData();
+    } catch (error: any) {
+      toast({
+        title: 'Failed to start print',
+        description: error.response?.data?.error || 'The printer rejected the job',
+        variant: 'destructive',
+      });
+    } finally {
+      setStarting(false);
+      setRowToStart(null);
     }
   };
 
@@ -254,6 +296,7 @@ export function SchedulePanel() {
           <CardTitle>Upcoming Schedule</CardTitle>
           <CardDescription>
             Run "Optimize Queue" after approving jobs to (re)build this schedule.
+            Prints never start automatically — press Start and confirm the bed is clear when a slot comes up.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -275,40 +318,86 @@ export function SchedulePanel() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {schedule.map((row) => (
-                  <TableRow key={row.id}>
-                    <TableCell className="font-medium">{row.job_name}</TableCell>
-                    <TableCell>{row.username}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{row.printer_name}</Badge>
-                    </TableCell>
-                    <TableCell>{new Date(row.start_time).toLocaleString()}</TableCell>
-                    <TableCell>{new Date(row.end_time).toLocaleString()}</TableCell>
-                    <TableCell>
-                      {row.is_overnight ? (
-                        <Badge variant="secondary" className="gap-1">
-                          <Moon className="h-3 w-3" />
-                          Overnight
-                        </Badge>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-destructive hover:text-destructive"
-                        onClick={() => handleRemove(row.id)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {schedule.map((row) => {
+                  const isDue = new Date(row.start_time).getTime() <= Date.now();
+                  const canStart = row.job_status === 'scheduled';
+                  return (
+                    <TableRow key={row.id}>
+                      <TableCell className="font-medium">{row.job_name}</TableCell>
+                      <TableCell>{row.username}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline">{row.printer_name}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        {new Date(row.start_time).toLocaleString()}
+                        {isDue && canStart && (
+                          <Badge variant="default" className="ml-2 text-[10px]">due</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>{new Date(row.end_time).toLocaleString()}</TableCell>
+                      <TableCell>
+                        {row.job_status === 'printing' ? (
+                          <Badge variant="default">Printing</Badge>
+                        ) : row.is_overnight ? (
+                          <Badge variant="secondary" className="gap-1">
+                            <Moon className="h-3 w-3" />
+                            Overnight
+                          </Badge>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          {canStart && (
+                            <Button
+                              variant={isDue ? 'default' : 'outline'}
+                              size="sm"
+                              className="h-8"
+                              disabled={!row.gcode_file_id}
+                              title={row.gcode_file_id ? undefined : 'Slice this job first (Manage Jobs > Slice)'}
+                              onClick={() => setRowToStart(row)}
+                            >
+                              <Play className="h-3 w-3 mr-1" />
+                              {row.gcode_file_id ? 'Start' : 'Slice first'}
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:text-destructive"
+                            onClick={() => handleRemove(row.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
         </CardContent>
       </Card>
+
+      {/* Bed-clear confirmation before any print starts */}
+      <AlertDialog open={!!rowToStart} onOpenChange={(open) => { if (!open && !starting) setRowToStart(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Is the print bed clear?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are about to start "{rowToStart?.job_name}" on {rowToStart?.printer_name}.
+              Confirm the previous print has been removed and the bed on {rowToStart?.printer_name} is clear and ready.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={starting}>Not yet</AlertDialogCancel>
+            <AlertDialogAction onClick={(event) => { event.preventDefault(); handleConfirmStart(); }} disabled={starting}>
+              {starting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
+              Bed is clear — start print
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
