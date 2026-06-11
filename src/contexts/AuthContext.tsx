@@ -116,9 +116,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         description: `Welcome back, ${user.username}!`,
       });
     } catch (error: any) {
+      const message = error.response?.data?.error || error.message || 'Unable to reach the backend API';
       toast({
         title: 'Login failed',
-        description: error.response?.data?.error || 'Invalid credentials',
+        description: message,
         variant: 'destructive',
       });
       throw error;
@@ -141,9 +142,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         description: `Welcome, ${user.username}!`,
       });
     } catch (error: any) {
+      const message = error.response?.data?.error || error.message || 'Unable to reach the backend API';
       toast({
         title: 'Registration failed',
-        description: error.response?.data?.error || 'Failed to create account',
+        description: message,
         variant: 'destructive',
       });
       throw error;

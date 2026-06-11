@@ -1,7 +1,6 @@
+import './config/env';
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import path from 'path';
 import { createServer } from 'http';
 import { initWebSocket } from './websocket';
 import { initializeDatabase, closeDatabase } from './database';
@@ -11,10 +10,6 @@ import printersRoutes from './routes/printers';
 import { emailService } from './utils/emailService';
 import { db } from './database';
 import { getPrinterStatus } from './services/printerControl';
-
-// Load environment variables (support backend/.env when launched from repo root)
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 // Initialize database
 initializeDatabase();
@@ -42,10 +37,45 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
 // Middleware
-const defaultOrigins = ['http://localhost:5173', 'http://localhost:8080'];
+const defaultOrigins = ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081'];
 const corsOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
   : defaultOrigins;
+const isProduction = process.env.NODE_ENV === 'production';
+
+function isPrivateIpv4(hostname: string) {
+  const parts = hostname.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  const [first, second] = parts;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function isAllowedDevOrigin(origin: string) {
+  if (isProduction) {
+    return false;
+  }
+
+  try {
+    const url = new URL(origin);
+    return (
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' ||
+        url.hostname === '127.0.0.1' ||
+        url.hostname === '::1' ||
+        isPrivateIpv4(url.hostname))
+    );
+  } catch {
+    return false;
+  }
+}
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -53,7 +83,7 @@ app.use(cors({
       callback(null, true);
       return;
     }
-    if (corsOrigins.includes(origin)) {
+    if (corsOrigins.includes(origin) || isAllowedDevOrigin(origin)) {
       callback(null, true);
       return;
     }
