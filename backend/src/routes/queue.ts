@@ -2,6 +2,7 @@ import express from 'express';
 import { getDatabase } from '../database';
 import { authenticateToken, requireRole } from '../middleware/auth';
 import { optimizeQueue, PrintJob, PrinterSchedule, WorkHours } from '../utils/queueOptimizer';
+import { broadcast } from '../websocket';
 
 const router = express.Router();
 
@@ -39,12 +40,12 @@ router.post('/optimize', authenticateToken, async (req, res) => {
     const printJobs: PrintJob[] = jobs.map(job => {
       // Get printer-specific times for this job
       const printerTimes = db.prepare(`
-        SELECT printer_id, estimated_time_minutes FROM job_printer_times WHERE job_id = ?
+        SELECT printer_id, estimated_minutes FROM job_printer_times WHERE job_id = ?
       `).all(job.id) as any[];
 
       const printerSpecificTimes: { [printerId: string]: number } = {};
       printerTimes.forEach((pt: any) => {
-        printerSpecificTimes[pt.printer_id] = pt.estimated_time_minutes;
+        printerSpecificTimes[pt.printer_id] = pt.estimated_minutes;
       });
 
       return {
@@ -79,15 +80,15 @@ router.post('/optimize', authenticateToken, async (req, res) => {
     // Clear existing schedule
     db.prepare('DELETE FROM queue_schedule').run();
 
-    // Save new schedule to database
+    // Save new schedule to database (printer ids are TEXT, job ids are INTEGER)
     for (const scheduled of result.scheduledPrints) {
       db.prepare(`
         INSERT INTO queue_schedule (
           job_id, printer_id, start_time, end_time, is_overnight, created_at
         ) VALUES (?, ?, ?, ?, ?, datetime('now'))
       `).run(
-        parseInt(scheduled.jobId),
-        parseInt(scheduled.printerId),
+        Number.parseInt(scheduled.jobId, 10),
+        scheduled.printerId,
         scheduled.startTime.toISOString(),
         scheduled.endTime.toISOString(),
         scheduled.isOvernight ? 1 : 0
@@ -95,10 +96,13 @@ router.post('/optimize', authenticateToken, async (req, res) => {
 
       // Update job status to scheduled
       db.prepare('UPDATE print_jobs SET status = ? WHERE id = ?')
-        .run('scheduled', parseInt(scheduled.jobId));
+        .run('scheduled', Number.parseInt(scheduled.jobId, 10));
     }
 
-    // TODO: Broadcast via WebSocket
+    broadcast('queue:optimized', {
+      scheduled: result.totalPrintsScheduled,
+      unscheduled: result.totalPrintsUnscheduled,
+    });
 
     res.json({
       success: true,
@@ -122,22 +126,36 @@ router.post('/optimize', authenticateToken, async (req, res) => {
 router.get('/schedule', authenticateToken, async (req, res) => {
   try {
     const db = getDatabase();
-    const schedule = db.prepare(`
+    const user = (req as any).user;
+
+    let query = `
       SELECT 
         qs.*,
         pj.name as job_name,
         pj.priority,
         pj.user_id,
+        pj.status as job_status,
+        pj.gcode_file_id,
         p.name as printer_name,
         p.type as printer_type,
+        p.status as printer_status,
         u.username
       FROM queue_schedule qs
       JOIN print_jobs pj ON qs.job_id = pj.id
       JOIN printers p ON qs.printer_id = p.id
       JOIN users u ON pj.user_id = u.id
       WHERE qs.end_time >= datetime('now')
-      ORDER BY qs.start_time ASC
-    `).all();
+    `;
+    const params: any[] = [];
+
+    // Students only see their own scheduled prints
+    if (user.role === 'student') {
+      query += ' AND pj.user_id = ?';
+      params.push(user.id);
+    }
+
+    query += ' ORDER BY qs.start_time ASC';
+    const schedule = db.prepare(query).all(...params);
 
     res.json(schedule);
   } catch (error) {
@@ -147,7 +165,7 @@ router.get('/schedule', authenticateToken, async (req, res) => {
 });
 
 // Remove from schedule
-router.delete('/schedule/:id', authenticateToken, requireRole(['operator', 'admin']), async (req, res) => {
+router.delete('/schedule/:id', authenticateToken, requireRole(['operator', 'admin', 'org_admin']), async (req, res) => {
   try {
     const schedule_id = req.params.id;
     const db = getDatabase();

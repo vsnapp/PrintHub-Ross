@@ -374,7 +374,7 @@ export function PrinterDetailsDialog({
       : [...connectionDetails.macros, { name: normalizedName, gcode: gcodeToSend }];
 
     setConnectionDetails(prev => ({ ...prev, macros: nextMacros }));
-    onUpdate(printer.id, { connectionDetails: { ...connectionDetails, macros: nextMacros } });
+    onUpdate(printer.id, { connectionDetails: { ...printer.connectionDetails, macros: nextMacros } });
     setMacroName("");
 
     toast({
@@ -386,7 +386,7 @@ export function PrinterDetailsDialog({
   const handleDeleteMacro = (name: string) => {
     const nextMacros = connectionDetails.macros.filter((macro) => macro.name !== name);
     setConnectionDetails(prev => ({ ...prev, macros: nextMacros }));
-    onUpdate(printer.id, { connectionDetails: { ...connectionDetails, macros: nextMacros } });
+    onUpdate(printer.id, { connectionDetails: { ...printer.connectionDetails, macros: nextMacros } });
   };
 
   const handleSendMacro = async (gcode: string) => {
@@ -620,7 +620,7 @@ export function PrinterDetailsDialog({
                           <Label htmlFor="connection-protocol">Protocol</Label>
                           <Select
                             value={connectionDetails.protocol}
-                            onValueChange={(value) => setConnectionDetails(prev => ({ ...prev, protocol: value }))}
+                            onValueChange={(value) => setConnectionDetails(prev => ({ ...prev, protocol: value as 'http' | 'https' }))}
                           >
                             <SelectTrigger id="connection-protocol">
                               <SelectValue />

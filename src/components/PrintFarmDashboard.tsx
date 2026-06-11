@@ -14,9 +14,9 @@ import { PrinterDetailsDialog } from "./PrinterDetailsDialog";
 import { CreatePrinterDialog } from "./CreatePrinterDialog";
 import { FilamentInventory } from "./FilamentInventory";
 import { SlicerSection } from "./SlicerSection";
-import { PrintSchedule } from "./PrintSchedule";
+import { SchedulePanel } from "./SchedulePanel";
 import { Printer, PrinterGroup as PrinterGroupType, BatchCommand, PrinterStatus, FilamentInventoryItem } from "@/types/printer";
-import { printersApi } from "@/lib/api";
+import { filesApi, printersApi, slicersApi, workHoursApi, SlicerIdentifier } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { 
   Factory, 
@@ -92,7 +92,19 @@ export function PrintFarmDashboard() {
       }
     }
 
+    let slicerDefaults = undefined;
+    if (printer.slicer_settings) {
+      try {
+        slicerDefaults = typeof printer.slicer_settings === 'string'
+          ? JSON.parse(printer.slicer_settings)
+          : printer.slicer_settings;
+      } catch (error) {
+        slicerDefaults = undefined;
+      }
+    }
+
     return {
+      slicerDefaults,
       id: String(printer.id),
       name: printer.name || 'Printer',
       status: printer.status || 'offline',
@@ -143,7 +155,37 @@ export function PrintFarmDashboard() {
 
   useEffect(() => {
     fetchPrinters();
+
+    // Load farm worker hours from the backend so the queue optimizer and the
+    // UI stay in sync.
+    workHoursApi.get()
+      .then((response) => {
+        setFarmWorkHours({
+          start: response.data?.start_hour ?? 8,
+          end: response.data?.end_hour ?? 18,
+        });
+      })
+      .catch(() => {
+        // Defaults remain if the lookup fails.
+      });
   }, []);
+
+  const handleFarmWorkHoursChange = async (hours: { start: number; end: number }) => {
+    setFarmWorkHours(hours);
+    try {
+      await workHoursApi.update({ start_hour: hours.start, end_hour: hours.end });
+      toast({
+        title: 'Worker hours saved',
+        description: 'The queue optimizer will use the new hours.',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Failed to save worker hours',
+        description: error.response?.data?.error || 'Unable to update work hours',
+        variant: 'destructive',
+      });
+    }
+  };
 
   const refreshPrinterStatuses = useCallback(async () => {
     if (printers.length === 0) {
@@ -591,6 +633,7 @@ export function PrintFarmDashboard() {
         connection_type: printerData.connectionType,
         integration_type: printerData.integrationType,
         connection_details: printerData.connectionDetails,
+        slicer_settings: printerData.slicerDefaults,
         speed_multiplier: printerData.speedMultiplier,
         max_print_speed: printerData.maxPrintSpeed,
         build_volume_x: printerData.buildVolume?.x,
@@ -812,12 +855,25 @@ export function PrintFarmDashboard() {
     return btoa(binary);
   };
 
+  /**
+   * Register sliced gcode with the backend so it can be sent to printers.
+   */
+  const uploadGcodeContent = async (gcodeContent: string, fileName: string): Promise<number | undefined> => {
+    try {
+      const gcodeFile = new File([gcodeContent], fileName, { type: 'text/plain' });
+      const response = await filesApi.upload(gcodeFile);
+      return response.data?.id;
+    } catch {
+      return undefined;
+    }
+  };
+
   const handleSliceFile = async (
     file: File,
     selectedPrinterIds: string[],
     selectedGroupIds: string[],
     jobConfig: {
-      slicer: 'cura' | 'orcaslicer' | 'bambu';
+      slicer: SlicerIdentifier;
       overrides: {
         layerHeight: number;
         infill: number;
@@ -828,71 +884,173 @@ export function PrintFarmDashboard() {
       };
     }
   ) => {
-    if (!window.electron) {
-      toast({
-        title: 'Desktop slicing unavailable',
-        description: 'Local slicing requires the Electron desktop app runtime.',
-        variant: 'destructive',
-      });
-      return null;
-    }
-
     const selectedSlicer = jobConfig.slicer;
 
-    const available = await window.electron.getAvailableSlicers();
-    const installed = new Set((available.slicers || []).map((slicer) => slicer.name));
-    if (!installed.has(selectedSlicer)) {
-      toast({
-        title: 'Slicer not installed',
-        description: `No local ${selectedSlicer} binary detected on this computer.`,
-        variant: 'destructive',
-      });
-      return null;
+    // Prefer slicing with the locally-installed slicer (desktop app), fall
+    // back to the server-side embedded slicing engine.
+    let useLocal = false;
+    if (window.electron) {
+      try {
+        const available = await window.electron.getAvailableSlicers();
+        const installed = new Set((available.slicers || []).map((slicer) => slicer.name));
+        useLocal = installed.has(selectedSlicer);
+      } catch {
+        useLocal = false;
+      }
     }
 
     toast({
-      title: 'Local slicing started',
-      description: `Processing ${file.name} for ${selectedPrinterIds.length} printers and ${selectedGroupIds.length} groups`,
+      title: useLocal ? 'Slicing locally' : 'Slicing on server',
+      description: `Processing ${file.name} with ${selectedSlicer}...`,
     });
 
     try {
-      const stlBase64 = await fileToBase64(file);
-      const result = await window.electron.sliceLocalFile({
+      if (useLocal && window.electron) {
+        const stlBase64 = await fileToBase64(file);
+        const result = await window.electron.sliceLocalFile({
+          slicer: selectedSlicer,
+          stlName: file.name,
+          stlBase64,
+          overrides: jobConfig.overrides,
+        });
+
+        if (!result.success) {
+          toast({
+            title: 'Local slicing failed',
+            description: (result as { error?: string }).error || 'Unknown slicing error',
+            variant: 'destructive',
+          });
+          return null;
+        }
+
+        const gcodeFileId = await uploadGcodeContent(result.gcodeContent, result.gcodeFileName);
+        return {
+          gcodeContent: result.gcodeContent,
+          gcodeFileName: result.gcodeFileName,
+          estimatedPrintTimeSeconds: result.estimatedPrintTimeSeconds,
+          gcodeFileId,
+        };
+      }
+
+      // Server-side slicing: upload the STL, slice with the embedded engine,
+      // then pull the gcode back for preview.
+      const uploadResponse = await filesApi.upload(file);
+      const stlFileId = uploadResponse.data?.id;
+      const sliceResponse = await slicersApi.slice({
+        file_id: stlFileId,
         slicer: selectedSlicer,
-        stlName: file.name,
-        stlBase64,
+        printer_id: selectedPrinterIds[0],
         overrides: jobConfig.overrides,
       });
 
-      if (!result.success) {
+      const data = sliceResponse.data;
+      if (data?.method === 'estimate') {
         toast({
-          title: 'Local slicing failed',
-          description: result.error,
-          variant: 'destructive',
+          title: 'Estimate only',
+          description: data.message || 'This target requires PreForm for final slicing.',
         });
         return null;
       }
 
+      let gcodeContent = '';
+      try {
+        const download = await filesApi.download(data.gcode_file_id);
+        gcodeContent = await (download.data as Blob).text();
+      } catch {
+        // Preview is optional; printing uses the server-side file id.
+      }
+
+      if (data.engine_fallback) {
+        toast({
+          title: 'Sliced with fallback engine',
+          description: `${data.requested_slicer} CLI was unavailable; used ${data.slicer} instead.`,
+        });
+      }
+
       return {
-        gcodeContent: result.gcodeContent,
-        gcodeFileName: result.gcodeFileName,
-        estimatedPrintTimeSeconds: result.estimatedPrintTimeSeconds,
+        gcodeContent,
+        gcodeFileName: data.gcode_file_name,
+        estimatedPrintTimeSeconds: (data.estimated_time_minutes || 0) * 60,
+        gcodeFileId: data.gcode_file_id,
       };
     } catch (error: any) {
       toast({
-        title: 'Local slicing failed',
-        description: error?.message || 'Unexpected slicing error',
+        title: 'Slicing failed',
+        description: error.response?.data?.error || error?.message || 'Unexpected slicing error',
         variant: 'destructive',
       });
       return null;
     }
   };
 
-  const handleUploadGcode = (file: File, selectedPrinters: string[], selectedGroups: string[]) => {
-    toast({
-      title: "Gcode uploaded",
-      description: `${file.name} sent to ${selectedPrinters.length} printers and ${selectedGroups.length} groups`,
-    });
+  /**
+   * Resolve the full target printer list (individual + group members).
+   */
+  const resolveTargetPrinterIds = (selectedPrinterIds: string[], selectedGroupIds: string[]): string[] => {
+    const ids = new Set(selectedPrinterIds);
+    for (const groupId of selectedGroupIds) {
+      const group = groups.find(g => g.id === groupId);
+      group?.printerIds.forEach(id => ids.add(id));
+    }
+    return Array.from(ids);
+  };
+
+  /**
+   * Start a print of an already-registered gcode file on the selected printers.
+   */
+  const handleStartPrints = async (fileId: number, selectedPrinterIds: string[], selectedGroupIds: string[]) => {
+    const targetIds = resolveTargetPrinterIds(selectedPrinterIds, selectedGroupIds);
+    if (targetIds.length === 0) {
+      toast({
+        title: 'No printers selected',
+        description: 'Select at least one printer or group',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    let started = 0;
+    const failures: string[] = [];
+    for (const printerId of targetIds) {
+      const printer = printers.find(p => p.id === printerId);
+      try {
+        await printersApi.startPrint(printerId, { file_id: fileId });
+        started += 1;
+        setPrinters(prev => prev.map(p => p.id === printerId ? { ...p, status: 'printing' } : p));
+      } catch (error: any) {
+        failures.push(`${printer?.name || printerId}: ${error.response?.data?.error || 'failed'}`);
+      }
+    }
+
+    if (started > 0) {
+      toast({
+        title: `Print started on ${started} printer${started === 1 ? '' : 's'}`,
+        description: failures.length > 0 ? `Failed: ${failures.join('; ')}` : undefined,
+      });
+    } else {
+      toast({
+        title: 'Failed to start prints',
+        description: failures.join('; ') || 'No printers accepted the job',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleUploadGcode = async (file: File, selectedPrinterIds: string[], selectedGroupIds: string[]) => {
+    try {
+      const response = await filesApi.upload(file);
+      const fileId = response.data?.id;
+      if (!fileId) {
+        throw new Error('Upload failed');
+      }
+      await handleStartPrints(fileId, selectedPrinterIds, selectedGroupIds);
+    } catch (error: any) {
+      toast({
+        title: 'Gcode upload failed',
+        description: error.response?.data?.error || error?.message || 'Unable to upload gcode',
+        variant: 'destructive',
+      });
+    }
   };
 
   return (
@@ -949,7 +1107,7 @@ export function PrintFarmDashboard() {
               pauseOnFilamentOut={pauseOnFilamentOut}
               onPauseOnFilamentOutChange={setPauseOnFilamentOut}
               farmWorkHours={farmWorkHours}
-              onFarmWorkHoursChange={setFarmWorkHours}
+              onFarmWorkHoursChange={handleFarmWorkHoursChange}
             />
           </div>
         </div>
@@ -1221,19 +1379,13 @@ export function PrintFarmDashboard() {
             groups={groups} 
             onSliceFile={handleSliceFile} 
             onUploadGcode={handleUploadGcode}
+            onStartPrints={handleStartPrints}
           />
         )}
 
         {/* Schedule View */}
         {viewMode === 'schedule' && (
-          <div>
-            <PrintSchedule 
-              printers={printers.map(p => ({ id: p.id, name: p.name, slicer: p.slicer, dailyOperatingHours: 16 }))} 
-              groups={groups}
-              initialWorkHours={farmWorkHours}
-              onWorkHoursChange={setFarmWorkHours}
-            />
-          </div>
+          <SchedulePanel />
         )}
 
         {/* Printer Details Dialog */}

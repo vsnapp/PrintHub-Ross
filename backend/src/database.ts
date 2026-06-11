@@ -146,6 +146,7 @@ export function initializeDatabase() {
   `);
 
   ensurePrinterColumns();
+  ensurePrintJobColumns();
 
   // Queue schedule
   db.exec(`
@@ -247,6 +248,21 @@ function ensurePrinterColumns() {
 
   if (!existing.has('connection_details')) {
     db.exec('ALTER TABLE printers ADD COLUMN connection_details TEXT');
+  }
+
+  // Per-printer default slicing settings (JSON: layerHeight, infill, nozzleTemperature, ...)
+  if (!existing.has('slicer_settings')) {
+    db.exec('ALTER TABLE printers ADD COLUMN slicer_settings TEXT');
+  }
+}
+
+function ensurePrintJobColumns() {
+  const columns = db.prepare("PRAGMA table_info('print_jobs')").all() as Array<{ name: string }>;
+  const existing = new Set(columns.map((column) => column.name));
+
+  // Sliced gcode produced for this job (the STL stays in file_id).
+  if (!existing.has('gcode_file_id')) {
+    db.exec('ALTER TABLE print_jobs ADD COLUMN gcode_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL');
   }
 }
 

@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { jobsApi, emailApi } from '@/lib/api';
+import { subscribeToEvent } from '@/lib/websocket';
 import { useToast } from '@/hooks/use-toast';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { JobSliceDialog } from './JobSliceDialog';
 import { 
   Select, 
   SelectContent, 
@@ -19,7 +21,8 @@ import {
   Clock, 
   Mail,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  Scissors
 } from 'lucide-react';
 
 interface Job {
@@ -34,6 +37,18 @@ interface Job {
   created_at: string;
   updated_at: string;
   notes?: string;
+  file_id?: number | null;
+  gcode_file_id?: number | null;
+  estimated_time_minutes?: number | null;
+}
+
+function formatMinutes(minutes?: number | null): string {
+  if (!minutes || minutes <= 0) {
+    return '—';
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = Math.round(minutes % 60);
+  return hours === 0 ? `${mins}m` : `${hours}h ${mins}m`;
 }
 
 export function JobManagement() {
@@ -43,11 +58,22 @@ export function JobManagement() {
   const [loading, setLoading] = useState(true);
   const [sendingEmail, setSendingEmail] = useState<number | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [jobToSlice, setJobToSlice] = useState<Job | null>(null);
 
   const isAdminOrOperator = user?.role === 'admin' || user?.role === 'operator' || (user as any)?.isOrgAdmin;
 
   useEffect(() => {
     fetchJobs();
+  }, [filterStatus]);
+
+  useEffect(() => {
+    const refresh = () => fetchJobs();
+    const unsubscribers = [
+      subscribeToEvent('job:created', refresh),
+      subscribeToEvent('job:updated', refresh),
+      subscribeToEvent('job:completed', refresh),
+    ];
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
   }, [filterStatus]);
 
   const fetchJobs = async () => {
@@ -69,7 +95,15 @@ export function JobManagement() {
 
   const handleStatusChange = async (jobId: number, newStatus: string) => {
     try {
-      await jobsApi.update(jobId, { status: newStatus });
+      // Use the dedicated approve/reject endpoints so notifications fire.
+      if (newStatus === 'approved') {
+        await jobsApi.approve(jobId);
+      } else if (newStatus === 'rejected') {
+        const reason = window.prompt('Reason for rejection (shown to the student):') || 'Rejected by operator';
+        await jobsApi.reject(jobId, reason);
+      } else {
+        await jobsApi.update(jobId, { status: newStatus });
+      }
       toast({
         title: 'Success',
         description: 'Job status updated successfully',
@@ -188,6 +222,7 @@ export function JobManagement() {
                 <TableHead>Status</TableHead>
                 <TableHead>Priority</TableHead>
                 <TableHead>Type</TableHead>
+                <TableHead>Est. Time</TableHead>
                 <TableHead>Deadline</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
@@ -205,12 +240,31 @@ export function JobManagement() {
                     </Badge>
                   </TableCell>
                   <TableCell>
+                    <span className="flex items-center gap-1">
+                      <Clock className="h-3 w-3 text-muted-foreground" />
+                      {formatMinutes(job.estimated_time_minutes)}
+                      {job.gcode_file_id ? (
+                        <Badge variant="outline" className="ml-1 text-[10px]">sliced</Badge>
+                      ) : null}
+                    </span>
+                  </TableCell>
+                  <TableCell>
                     {new Date(job.deadline).toLocaleDateString()}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
                       {isAdminOrOperator && (
                         <>
+                          {job.file_id && !['completed', 'cancelled', 'rejected'].includes(job.status) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setJobToSlice(job)}
+                            >
+                              <Scissors className="h-4 w-4 mr-1" />
+                              Slice
+                            </Button>
+                          )}
                           {job.status === 'pending' && (
                             <>
                               <Button
@@ -266,6 +320,12 @@ export function JobManagement() {
           </Table>
         )}
       </CardContent>
+
+      <JobSliceDialog
+        job={jobToSlice}
+        onClose={() => setJobToSlice(null)}
+        onSliced={fetchJobs}
+      />
     </Card>
   );
 }

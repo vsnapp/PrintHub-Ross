@@ -5,6 +5,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { getDatabase } from '../database';
 import { authenticateToken } from '../middleware/auth';
+import { estimatePrint, estimateResinPrint } from '../services/slicer';
 
 const router = express.Router();
 
@@ -149,6 +150,53 @@ router.get('/:id/metadata', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error fetching file metadata:', error);
     res.status(500).json({ error: 'Failed to fetch file metadata' });
+  }
+});
+
+// Estimate print time for an uploaded STL from geometry.
+// Students get an immediate "when will it be done" answer; an operator slice
+// later replaces this with the slicer's exact estimate.
+router.post('/:id/estimate', authenticateToken, async (req, res) => {
+  try {
+    const file_id = req.params.id;
+    const user_id = (req as any).user.id;
+    const user_role = (req as any).user.role;
+    const { printer_type, layer_height, infill, print_speed } = req.body || {};
+
+    const db = getDatabase();
+    const file = db.prepare('SELECT * FROM files WHERE id = ?').get(file_id) as any;
+
+    if (!file) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    if (user_role === 'student' && file.user_id !== user_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    if (path.extname(file.original_name).toLowerCase() !== '.stl') {
+      return res.status(400).json({ error: 'Only STL files can be estimated' });
+    }
+    if (!fs.existsSync(file.file_path)) {
+      return res.status(404).json({ error: 'File not found on disk' });
+    }
+
+    const estimate = printer_type === 'resin'
+      ? estimateResinPrint(file.file_path, layer_height || 0.1)
+      : estimatePrint(file.file_path, {
+          layerHeight: layer_height,
+          infill,
+          printSpeed: print_speed,
+        });
+
+    res.json({
+      file_id: Number(file_id),
+      estimated_time_minutes: estimate.estimatedMinutes,
+      estimated_filament_grams: estimate.estimatedFilamentGrams,
+      method: estimate.method,
+      stats: estimate.stats,
+    });
+  } catch (error: any) {
+    console.error('Error estimating file:', error);
+    res.status(500).json({ error: error?.message || 'Failed to estimate print time' });
   }
 });
 

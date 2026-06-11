@@ -1,9 +1,39 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import { getDatabase } from '../database';
 import { authenticateToken, requireRole } from '../middleware/auth';
 import { emailService } from '../utils/emailService';
+import { estimatePrint, estimateResinPrint } from '../services/slicer';
+import { broadcast } from '../websocket';
 
 const router = express.Router();
+
+function sendCompletionNotifications(db: any, job: any) {
+  broadcast('job:completed', {
+    jobId: job.id,
+    userId: job.user_id,
+    jobName: job.name,
+    status: 'completed',
+  });
+
+  if (!emailService.isAutoSendEnabled()) {
+    return;
+  }
+
+  const user = db.prepare('SELECT email, username FROM users WHERE id = ?').get(job.user_id) as any;
+  if (user && user.email) {
+    emailService.sendJobCompletionEmail(user.email, {
+      jobName: job.name,
+      username: user.username,
+      createdAt: new Date(job.created_at).toLocaleString(),
+      completedAt: new Date().toLocaleString(),
+      printerType: (job.printer_type || 'fdm').toUpperCase(),
+    }).catch(error => {
+      console.error('Failed to send automatic completion email:', error);
+    });
+  }
+}
 
 // Create new print job
 router.post('/', authenticateToken, async (req, res) => {
@@ -16,6 +46,24 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     const db = getDatabase();
+
+    // When the job references an STL and no estimate was provided, derive one
+    // from geometry so the student immediately gets a completion estimate.
+    let estimate = estimated_time_minutes || null;
+    if (!estimate && file_id) {
+      try {
+        const file = db.prepare('SELECT * FROM files WHERE id = ?').get(file_id) as any;
+        if (file && path.extname(file.original_name).toLowerCase() === '.stl' && fs.existsSync(file.file_path)) {
+          estimate = (printer_type === 'resin'
+            ? estimateResinPrint(file.file_path)
+            : estimatePrint(file.file_path)
+          ).estimatedMinutes;
+        }
+      } catch (error) {
+        console.warn('Geometry estimate failed for new job:', error);
+      }
+    }
+
     const result = db.prepare(`
       INSERT INTO print_jobs (
         user_id, name, file_id, deadline, priority, printer_type, 
@@ -28,13 +76,13 @@ router.post('/', authenticateToken, async (req, res) => {
       deadline,
       priority || 'medium',
       printer_type || 'fdm',
-      estimated_time_minutes || null,
+      estimate,
       notes || null
     );
 
     const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(result.lastInsertRowid);
 
-    // TODO: Broadcast via WebSocket
+    broadcast('job:created', { jobId: Number(result.lastInsertRowid), userId: user_id });
     res.status(201).json(job);
   } catch (error) {
     console.error('Error creating job:', error);
@@ -120,7 +168,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     const job_id = req.params.id;
     const user_id = (req as any).user.id;
     const user_role = (req as any).user.role;
-    const { status, priority, deadline, notes } = req.body;
+    const { status, priority, deadline, notes, estimated_time_minutes, slicer } = req.body;
 
     const db = getDatabase();
     const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(job_id);
@@ -160,33 +208,33 @@ router.patch('/:id', authenticateToken, async (req, res) => {
       updates.push('notes = ?');
       params.push(notes);
     }
+    if (estimated_time_minutes !== undefined && user_role !== 'student') {
+      updates.push('estimated_time_minutes = ?');
+      params.push(estimated_time_minutes);
+    }
+    if (slicer !== undefined && user_role !== 'student') {
+      updates.push('slicer = ?');
+      params.push(slicer);
+    }
 
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
     }
 
+    updates.push("updated_at = datetime('now')");
     params.push(job_id);
     db.prepare(`UPDATE print_jobs SET ${updates.join(', ')} WHERE id = ?`).run(...params);
 
     const updatedJob = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(job_id);
 
-    // Send email notification if job is completed and auto-send is enabled
-    if (status === 'completed' && oldStatus !== 'completed' && emailService.isAutoSendEnabled()) {
-      // Get user email
-      const user = db.prepare('SELECT email, username FROM users WHERE id = ?').get((job as any).user_id) as any;
-      
-      if (user && user.email) {
-        // Send email in background (don't wait for it)
-        emailService.sendJobCompletionEmail(user.email, {
-          jobName: (job as any).name,
-          username: user.username,
-          createdAt: new Date((job as any).created_at).toLocaleString(),
-          completedAt: new Date().toLocaleString(),
-          printerType: (job as any).printer_type.toUpperCase(),
-        }).catch(error => {
-          console.error('Failed to send automatic completion email:', error);
-        });
-      }
+    if (status === 'completed' && oldStatus !== 'completed') {
+      sendCompletionNotifications(db, job);
+    } else {
+      broadcast('job:updated', {
+        jobId: Number(job_id),
+        userId: (job as any).user_id,
+        status: (updatedJob as any)?.status,
+      });
     }
 
     res.json(updatedJob);
@@ -229,7 +277,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 // Approve job (operators only)
-router.patch('/:id/approve', authenticateToken, requireRole(['operator', 'admin']), async (req, res) => {
+router.patch('/:id/approve', authenticateToken, requireRole(['operator', 'admin', 'org_admin']), async (req, res) => {
   try {
     const job_id = req.params.id;
     const db = getDatabase();
@@ -242,6 +290,7 @@ router.patch('/:id/approve', authenticateToken, requireRole(['operator', 'admin'
     db.prepare('UPDATE print_jobs SET status = ? WHERE id = ?').run('approved', job_id);
     const updatedJob = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(job_id);
 
+    broadcast('job:approved', { jobId: Number(job_id), userId: (job as any).user_id });
     res.json(updatedJob);
   } catch (error) {
     console.error('Error approving job:', error);
@@ -250,7 +299,7 @@ router.patch('/:id/approve', authenticateToken, requireRole(['operator', 'admin'
 });
 
 // Reject job (operators only)
-router.patch('/:id/reject', authenticateToken, requireRole(['operator', 'admin']), async (req, res) => {
+router.patch('/:id/reject', authenticateToken, requireRole(['operator', 'admin', 'org_admin']), async (req, res) => {
   try {
     const job_id = req.params.id;
     const { reason } = req.body;
@@ -265,6 +314,7 @@ router.patch('/:id/reject', authenticateToken, requireRole(['operator', 'admin']
       .run('rejected', reason || 'Rejected by operator', job_id);
     
     const updatedJob = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(job_id);
+    broadcast('job:updated', { jobId: Number(job_id), userId: (job as any).user_id, status: 'rejected' });
     res.json(updatedJob);
   } catch (error) {
     console.error('Error rejecting job:', error);
