@@ -58,6 +58,13 @@ npm run dev
 ```
 
 The desktop app window will open. Login with operator/admin credentials.
+In development, Electron loads the web renderer from `http://localhost:8081/printhub/`
+and falls back to `http://localhost:8080/printhub/`. To use a different port, start
+Electron with `ELECTRON_RENDERER_URL`, for example:
+
+```bash
+ELECTRON_RENDERER_URL=http://localhost:5173/printhub/ npm run dev
+```
 
 ## Default Login
 

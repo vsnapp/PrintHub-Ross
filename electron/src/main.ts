@@ -10,7 +10,13 @@ let slicerManager: SlicerManager | null = null;
 let apiClient: ApiClient | null = null;
 
 const isDev = process.argv.includes('--dev');
-const devRendererUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:8080/printhub/';
+const defaultDevRendererUrls = [
+  'http://localhost:8081/printhub/',
+  'http://localhost:8080/printhub/',
+];
+const devRendererUrls = process.env.ELECTRON_RENDERER_URL
+  ? [process.env.ELECTRON_RENDERER_URL]
+  : defaultDevRendererUrls;
 
 const getRendererIndexPath = () => {
   return path.resolve(__dirname, '../../dist/index.html');
@@ -27,7 +33,8 @@ const buildLoadErrorHtml = (message: string) => {
 2) Start web app:   npm run dev  (from repo root)
 3) Start electron:  cd electron && npm run dev
 
-Expected web URL: ${devRendererUrl}</pre>
+Expected web URLs:
+${devRendererUrls.map((url) => `- ${url}`).join('\n')}</pre>
       </body>
     </html>
   `;
@@ -35,13 +42,17 @@ Expected web URL: ${devRendererUrl}</pre>
 
 async function loadRenderer(window: BrowserWindow) {
   if (isDev) {
-    try {
-      await window.loadURL(devRendererUrl);
-      return;
-    } catch (error: any) {
-      await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(buildLoadErrorHtml(error?.message || 'Unable to load dev renderer URL'))}`);
-      return;
+    const errors: string[] = [];
+    for (const rendererUrl of devRendererUrls) {
+      try {
+        await window.loadURL(rendererUrl);
+        return;
+      } catch (error: any) {
+        errors.push(`${rendererUrl}: ${error?.message || 'Unable to load dev renderer URL'}`);
+      }
     }
+    await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(buildLoadErrorHtml(errors.join('\n')))}`);
+    return;
   }
 
   const rendererIndexPath = getRendererIndexPath();
