@@ -13,10 +13,14 @@ import {
   SlicerId,
 } from '../services/slicer';
 import { broadcast } from '../websocket';
+import preformRoutes from './preform';
 
 const router = express.Router();
 
 const uploadsDir = path.join(__dirname, '../../uploads');
+
+// PreForm Server (Formlabs Local API) integration for resin job preparation
+router.use('/preform', preformRoutes);
 
 interface PrinterRow {
   id: string;

@@ -8,6 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Printer, PrinterGroup as PrinterGroupType } from "@/types/printer";
 import { SlicingViewer } from "./SlicingViewer";
+import { ResinPrepDialog } from "./ResinPrepDialog";
 import { slicersApi, SlicerIdentifier } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -22,6 +23,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { 
   Upload, 
+  Droplets,
   Play,
   Printer as PrinterIcon,
   Send,
@@ -109,6 +111,7 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
   const [uploadedGcodeContent, setUploadedGcodeContent] = useState<string | undefined>(undefined);
   // Bed-clear confirmation before dispatching prints to the selected targets.
   const [confirmAction, setConfirmAction] = useState<null | 'sliced' | 'gcode'>(null);
+  const [showResinPrep, setShowResinPrep] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -536,6 +539,16 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
               <Play className="mr-2 h-4 w-4" />
               Slice STL File
             </Button>
+
+            <Button
+              onClick={() => setShowResinPrep(true)}
+              disabled={!stlFile || isSlicing}
+              variant="outline"
+              className="w-full"
+            >
+              <Droplets className="mr-2 h-4 w-4" />
+              Resin Prep (PreForm)
+            </Button>
             
             {slicedGcodeFileId !== undefined && onStartPrints && (
               <Button
@@ -648,6 +661,14 @@ export function SlicerSection({ printers, groups, onSliceFile, onUploadGcode, on
           </div>
         </CardContent>
       </Card>
+
+      {/* Custom resin slicing UI -> PreForm Server translation */}
+      <ResinPrepDialog
+        open={showResinPrep}
+        onClose={() => setShowResinPrep(false)}
+        file={stlFile}
+        printerId={selectedPrinters[0]}
+      />
 
       {/* Bed-clear confirmation before dispatching gcode to printers */}
       <AlertDialog open={confirmAction !== null} onOpenChange={(open) => { if (!open) setConfirmAction(null); }}>

@@ -89,9 +89,28 @@ install locations and `PATH`; you can also point at specific binaries with envir
 | PrusaSlicer | `PRUSASLICER_PATH` | Full headless slicing support (recommended baseline engine) |
 | OrcaSlicer | `ORCASLICER_PATH` | Headless CLI support varies by release; falls back to another engine if unavailable |
 | Bambu Studio | `BAMBU_STUDIO_PATH` | Same as OrcaSlicer |
-| PreForm | `PREFORM_PATH` | No headless CLI; resin jobs use geometry-based estimates + "Open in PreForm" |
+| PreForm | `PREFORM_PATH` | GUI launch only; for headless resin prep use **PreForm Server** below |
 
 On Debian/Ubuntu servers, `sudo apt install prusa-slicer` is enough to enable server-side slicing.
+
+#### Resin prep with PreForm Server (Formlabs Local API)
+
+PrintHub includes a custom resin slicing UI (dashboard → Slicer → "Resin Prep", or Manage Jobs →
+Slice on a resin job): orient, position and scale the model on a virtual Formlabs build platform,
+pick material/layer thickness/support settings, and PrintHub translates that exact scene setup into
+[Formlabs Local API](https://formlabs-dashboard-api-resources.s3.amazonaws.com/formlabs-local-api-latest.html)
+calls — auto-supports, PreForm's real print-time/resin estimates, a saved `.form` job file, and
+direct upload to Formlabs printers.
+
+Setup (the headless **PreFormServer** app from Formlabs, Windows/macOS):
+
+| Variable | Meaning |
+|----------|---------|
+| `PREFORM_SERVER_URL` | URL of an already-running PreFormServer, e.g. `http://localhost:44388` |
+| `PREFORM_SERVER_PATH` | Path to the PreFormServer executable; PrintHub spawns/manages it on demand |
+
+PreFormServer must run on the same machine as the backend (it reads model files from local paths).
+Without it, resin jobs still get geometry-based estimates.
 
 When no slicing engine is available, students still get instant print-time estimates computed
 from the STL geometry; the estimate is replaced by the slicer's exact time once a real slice runs.

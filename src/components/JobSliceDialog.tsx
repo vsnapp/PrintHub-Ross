@@ -18,7 +18,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { printersApi, slicersApi, SlicerIdentifier } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Play, Scissors } from 'lucide-react';
+import { ResinPrepDialog } from './ResinPrepDialog';
+import { Droplets, Loader2, Play, Scissors } from 'lucide-react';
 
 interface JobForSlicing {
   id: number;
@@ -58,6 +59,7 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
   const [starting, setStarting] = useState(false);
   // A human must confirm the bed is clear before any print is started.
   const [showBedConfirm, setShowBedConfirm] = useState(false);
+  const [showResinPrep, setShowResinPrep] = useState(false);
   const [result, setResult] = useState<any | null>(null);
   const [overrides, setOverrides] = useState({
     layerHeight: '',
@@ -314,10 +316,22 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
             </div>
           )}
 
+          {job?.printer_type === 'resin' && (
+            <Button
+              variant="outline"
+              className="w-full"
+              disabled={!job?.file_id}
+              onClick={() => setShowResinPrep(true)}
+            >
+              <Droplets className="h-4 w-4 mr-2" />
+              Resin Prep (orient + supports via PreForm)
+            </Button>
+          )}
+
           <div className="flex gap-2">
             <Button onClick={handleSlice} disabled={slicing || !job?.file_id} className="flex-1">
               {slicing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Scissors className="h-4 w-4 mr-2" />}
-              Slice
+              {job?.printer_type === 'resin' ? 'Quick Estimate' : 'Slice'}
             </Button>
             <Button
               onClick={() => setShowBedConfirm(true)}
@@ -330,6 +344,18 @@ export function JobSliceDialog({ job, onClose, onSliced }: JobSliceDialogProps) 
             </Button>
           </div>
         </div>
+
+        {job && (
+          <ResinPrepDialog
+            open={showResinPrep}
+            onClose={() => setShowResinPrep(false)}
+            fileId={job.file_id || undefined}
+            jobId={job.id}
+            jobName={job.name}
+            printerId={selectedPrinterId || undefined}
+            onPrepared={onSliced}
+          />
+        )}
 
         {/* Bed-clear confirmation before the print starts */}
         <AlertDialog open={showBedConfirm} onOpenChange={(open) => { if (!open && !starting) setShowBedConfirm(false); }}>

@@ -142,6 +142,46 @@ export const slicersApi = {
   }) => api.post('/slicers/slice', data, { timeout: 10 * 60 * 1000 }),
 };
 
+// PreForm Server (Formlabs Local API) — resin job preparation
+export interface PreformPrepareRequest {
+  file_id: number;
+  job_id?: number;
+  printer_id?: string;
+  scene: {
+    machine_type: string;
+    material_code: string;
+    layer_thickness_mm: number | 'ADAPTIVE';
+    print_setting?: string;
+  };
+  transform?: {
+    orientation?: { x: number; y: number; z: number };
+    position?: { x: number; y: number; z?: number };
+    scale?: number;
+  };
+  auto_orient?: boolean;
+  auto_layout?: boolean;
+  supports?: {
+    enabled: boolean;
+    density?: number;
+    touchpoint_size_mm?: number;
+    raft_type?: 'FULL_RAFT' | 'MINI_RAFT' | 'MINI_RAFTS_ON_BP';
+    internal_supports_enabled?: boolean;
+  };
+}
+
+export const preformApi = {
+  status: () => api.get('/slicers/preform/status'),
+  prepare: (data: PreformPrepareRequest) =>
+    api.post('/slicers/preform/prepare', data, { timeout: 15 * 60 * 1000 }),
+  print: (data: {
+    form_file_id: number;
+    printer: string;
+    job_id?: number;
+    printer_id?: string;
+    job_name?: string;
+  }) => api.post('/slicers/preform/print', data, { timeout: 10 * 60 * 1000 }),
+};
+
 // Jobs
 export const jobsApi = {
   list: (params?: { status?: string; user_id?: number }) =>
