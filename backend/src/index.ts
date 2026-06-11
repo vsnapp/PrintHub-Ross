@@ -37,10 +37,16 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
 // Middleware
-const defaultOrigins = ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081'];
-const corsOrigins = process.env.CORS_ORIGIN
+const defaultOrigins = [
+  'http://localhost:5173',
+  'http://localhost:8080',
+  'http://localhost:8081',
+  'http://192.168.1.215:8081',
+];
+const configuredCorsOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
-  : defaultOrigins;
+  : [];
+const corsOrigins = Array.from(new Set([...defaultOrigins, ...configuredCorsOrigins]));
 const isProduction = process.env.NODE_ENV === 'production';
 
 function isPrivateIpv4(hostname: string) {
